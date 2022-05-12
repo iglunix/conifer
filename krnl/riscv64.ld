@@ -16,9 +16,14 @@ SECTIONS
 		. = ALIGN(4096);
 		PROVIDE(_text_start = .);
 		*(.text._start)
-		*(.text.init)
 		*(.text .text.*)
+		*(.text.init)
 		PROVIDE(_text_end = .);
+		*(.boot)
+		*(.init)
+		*(.trap)
+		. = ALIGN(4096);
+		*(.scratch)
 	} > ram AT>ram :text
 
 	PROVIDE(_global_pointer = .);

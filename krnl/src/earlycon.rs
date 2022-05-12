@@ -38,4 +38,3 @@ macro_rules! eprintln {
     () => ($crate::eprint!("\n"));
     ($($arg:tt)*) => ($crate::eprint!("{}\n", format_args!($($arg)*)));
 }
-

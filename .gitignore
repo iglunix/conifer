@@ -1,0 +1,4 @@
+/target
+*.elf
+*/target
+/usr
