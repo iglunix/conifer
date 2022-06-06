@@ -1,214 +1,354 @@
-#[repr(align(4096))]
 #[naked]
-#[link_section = ".trap"]
-pub unsafe extern "C" fn trap_start() {
-    core::arch::asm!("
-        csrrw t6, sscratch, t6
-        sd x0, 0(t6)
-        sd ra, 8(t6)
-        sd sp, 16(t6)
-        sd gp, 24(t6)
-        sd tp, 32(t6)
-        sd t0, 40(t6)
-        sd t1, 48(t6)
-        sd t2, 56(t6)
-        sd s0, 64(t6)
-        sd s1, 72(t6)
-        sd a0, 80(t6)
-        sd a1, 88(t6)
-        sd a2, 96(t6)
-        sd a3, 104(t6)
-        sd a4, 112(t6)
-        sd a5, 120(t6)
-        sd a6, 128(t6)
-        sd a7, 136(t6)
-        sd s2, 144(t6)
-        sd s3, 152(t6)
-        sd s4, 160(t6)
-        sd s5, 168(t6)
-        sd s6, 176(t6)
-        sd s7, 184(t6)
-        sd s8, 192(t6)
-        sd s9, 200(t6)
-        sd s10, 208(t6)
-        sd s11, 216(t6)
-        sd t3, 224(t6)
-        sd t4, 232(t6)
-        sd t5, 240(t6)
-        csrrw t5, sscratch, t5
-        sd t5, 248(t6)
-        csrrw t5, sscratch, t5
+#[repr(align(4))]
+pub unsafe extern "C" fn k_trap_start() {
+    core::arch::asm!(
+        "addi sp, sp, -16
+         csrr ra, sepc
+         sd ra, 8(sp)
+         sd fp, 0(sp)
+         addi fp, sp, 16
+         call {}", sym trap_entry, options(noreturn));
+}
 
-        # load kernel stack pointer
-        ld sp, 264(t6)
+#[naked]
+#[repr(align(4))]
+pub unsafe extern "C" fn u_trap_start() {
+    core::arch::asm!(
+        "csrrw t6, stvec, t6
+         la t6, {}
+         csrrw t6, stvec, t6
 
-        # load kernel satp
-        ld a1, 272(t6)
-        csrrw a1, satp, a1
-        sd a1, 272(t6)
-        sfence.vma
-            
-        mv a0, t6
-        ld t1, 256(t6)
-        auipc ra, 0
-        addi ra, ra, 8
-        jalr t1
-        la t1, {}
-        
-        # load user satp
-        ld a1, 272(t6)
-        csrrw a1, satp, a1
-        sd a1, 272(t6)
-        sfence.vma
-            
-        ld ra, 8(t6)
-        ld sp, 16(t6)
-        ld gp, 24(t6)
-        ld tp, 32(t6)
-        ld t0, 40(t6)
-        ld t1, 48(t6)
-        ld t2, 56(t6)
-        ld s0, 64(t6)
-        ld s1, 72(t6)
-        ld a0, 80(t6)
-        ld a1, 88(t6)
-        ld a2, 96(t6)
-        ld a3, 104(t6)
-        ld a4, 112(t6)
-        ld a5, 120(t6)
-        ld a6, 128(t6)
-        ld a7, 136(t6)
-        ld s2, 144(t6)
-        ld s3, 152(t6)
-        ld s4, 160(t6)
-        ld s5, 168(t6)
-        ld s6, 176(t6)
-        ld s7, 184(t6)
-        ld s8, 192(t6)
-        ld s9, 200(t6)
-        ld s10, 208(t6)
-        ld s11, 216(t6)
-        ld t3, 224(t6)
-        ld t4, 232(t6)
-        ld t5, 240(t6)
-        csrrw t5, sscratch, t5
-        ld t5, 248(t6)
-        csrrw t5, sscratch, t5
+         csrrw sp, sscratch, sp
+         la sp, {}
+         ld sp, 0(sp)
+         addi sp, sp, -256
 
-        csrrw t6, sscratch, t6
+         sd x0, 0(sp)
+         sd x1, 8(sp)
+         sd x2, 16(sp)
+         sd x3, 24(sp)
+         sd x4, 32(sp)
+         sd x5, 40(sp)
+         sd x6, 48(sp)
+         sd x7, 56(sp)
+         sd x8, 64(sp)
+         sd x9, 72(sp)
+         sd x10, 80(sp)
+         sd x11, 88(sp)
+         sd x12, 96(sp)
+         sd x13, 104(sp)
+         sd x14, 112(sp)
+         sd x15, 120(sp)
+         sd x16, 128(sp)
+         sd x17, 136(sp)
+         sd x18, 144(sp)
+         sd x19, 152(sp)
+         sd x20, 160(sp)
+         sd x21, 168(sp)
+         sd x22, 176(sp)
+         sd x23, 184(sp)
+         sd x24, 192(sp)
+         sd x25, 200(sp)
+         sd x26, 208(sp)
+         sd x27, 216(sp)
+         sd x28, 224(sp)
+         sd x29, 232(sp)
+         sd x30, 240(sp)
+         sd x31, 248(sp)
 
-        sret
-    ", sym trap_entry, options(noreturn));
+         mv a0, sp
+
+         // addi sp, sp, -16
+         // csrr t6, sepc
+         // sd t6, 8(sp)
+         // sd x0, 0(sp)
+         // addi fp, sp, 16
+
+         call {}
+
+         // addi sp, sp, 16
+
+         ld x1, 8(sp)
+         ld x2, 16(sp)
+         ld x3, 24(sp)
+         ld x4, 32(sp)
+         ld x5, 40(sp)
+         ld x6, 48(sp)
+         ld x7, 56(sp)
+         ld x8, 64(sp)
+         ld x9, 72(sp)
+         ld x10, 80(sp)
+         ld x11, 88(sp)
+         ld x12, 96(sp)
+         ld x13, 104(sp)
+         ld x14, 112(sp)
+         ld x15, 120(sp)
+         ld x16, 128(sp)
+         ld x17, 136(sp)
+         ld x18, 144(sp)
+         ld x19, 152(sp)
+         ld x20, 160(sp)
+         ld x21, 168(sp)
+         ld x22, 176(sp)
+         ld x23, 184(sp)
+         ld x24, 192(sp)
+         ld x25, 200(sp)
+         ld x26, 208(sp)
+         ld x27, 216(sp)
+         ld x28, 224(sp)
+         ld x29, 232(sp)
+         ld x30, 240(sp)
+         ld x31, 248(sp)
+
+         addi sp, sp, 256
+         csrrw sp, sscratch, sp
+
+
+         csrrw t6, stvec, t6
+         la t6, {}
+         csrrw t6, stvec, t6
+
+         sret", sym k_trap_start, sym KRNL_SP, sym trap_entry, sym u_trap_start, options(noreturn));
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct Frame {
+    fp: *const Frame,
+    ra: usize,
+}
+
+pub static mut KRNL_ELF_ADDR: usize = 0;
+pub static mut KRNL_SP: usize = 0xffffffc00001ff00;
+pub static mut FDT_ADDR: usize = 0;
+
+unsafe fn find_symbol(ra: usize) -> &'static str {
+    let krnl_elf = elf::Elf::new(KRNL_ELF_ADDR as *const u8);
+    let symtab = krnl_elf
+        .shdrs
+        .iter()
+        .find_map(|shdr| {
+            if matches!(shdr.ty, elf::ShType::SymTab) {
+                Some(core::slice::from_raw_parts(
+                    (KRNL_ELF_ADDR as *const u8).offset(shdr.offset as isize)
+                        as *const elf::SymTabEnt,
+                    shdr.size / core::mem::size_of::<elf::SymTabEnt>(),
+                ))
+            } else {
+                None
+            }
+        })
+        .unwrap();
+
+    let strtab = krnl_elf
+        .shdrs
+        .iter()
+        .rev()
+        .find_map(|shdr| {
+            if matches!(shdr.ty, elf::ShType::StrTab) {
+                Some(core::slice::from_raw_parts(
+                    (KRNL_ELF_ADDR as *const u8).offset(shdr.offset as isize),
+                    shdr.size,
+                ))
+            } else {
+                None
+            }
+        })
+        .unwrap();
+
+    let mut distance = 0xffffffffffffffff;
+    let mut ret = None;
+    for sym in symtab {
+        if sym.name > 0 && sym.value > 0xffffffc000000000 && strtab[sym.name as usize] != b'.' {
+            if (ra - sym.value) < distance {
+                ret = Some(sym);
+                distance = ra - sym.value;
+            }
+        }
+    }
+    let ret = ret.unwrap();
+
+    let mut len = 0;
+    while strtab[ret.name as usize + len] != b'\0' {
+        len += 1
+    }
+    core::str::from_utf8(&strtab[(ret.name as usize)..(ret.name as usize + len)]).unwrap()
+}
+
+#[repr(packed)]
+#[derive(Debug, Clone, Copy)]
+struct DebugLineHdr {
+    length: u32,
+    version: u16,
+    hdr_length: u32,
+    min_instr_length: u8,
+    default_is_stmt: u8,
+    line_base: i8,
+    line_range: u8,
+    op_base: u8,
+    op_lengths: [u8; 12],
+}
+
+unsafe fn _addr2line(ra: usize) -> &'static str {
+    let krnl_elf = elf::Elf::new(KRNL_ELF_ADDR as *const u8);
+    let shstrtab = krnl_elf
+        .shdrs
+        .iter()
+        .find_map(|shdr| {
+            if matches!(shdr.ty, elf::ShType::StrTab) {
+                Some(core::slice::from_raw_parts(
+                    (KRNL_ELF_ADDR as *const u8).offset(shdr.offset as isize),
+                    shdr.size,
+                ))
+            } else {
+                None
+            }
+        })
+        .unwrap();
+
+    let debug_line = krnl_elf
+        .shdrs
+        .iter()
+        .find_map(|shdr| {
+            if matches!(shdr.ty, elf::ShType::ProgBits) {
+                let mut len = 0;
+                while shstrtab[shdr.name as usize + len] != b'\0' {
+                    len += 1
+                }
+
+                let name = &shstrtab[(shdr.name as usize)..(shdr.name as usize + len)];
+                let name = core::str::from_utf8(name).unwrap();
+                if name == ".debug_line" {
+                    eprintln!("debug_line_offset: {:x}", shdr.offset);
+                    Some(core::slice::from_raw_parts(
+                        (KRNL_ELF_ADDR as *const u8).offset(shdr.offset as isize),
+                        shdr.size,
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    eprintln!(
+        "debug_line: {:#x?}",
+        &*(debug_line.as_ptr() as *const DebugLineHdr)
+    );
+    ""
+}
+
+impl Frame {
+    pub unsafe fn unwind(&self, idx: usize) {
+        let krnl_elf = elf::Elf::new(KRNL_ELF_ADDR as *const u8);
+        if self.fp as usize > 0xffffffc00001ff00 {
+            let sym = find_symbol(self.ra);
+            let sym = rustc_demangle::demangle(sym);
+            eprintln!("{:>4}: {}", idx, sym);
+            eprintln!("             at {:x}", self.ra);
+            (*self.fp.offset(-1)).unwind(idx + 1)
+        }
+    }
 }
 
 #[repr(usize)]
 #[derive(Debug)]
-#[allow(unused)]
-enum Exception {
-    InstructionMisaligned = 0,
-    InstructionAccess = 1,
-    IllegalInstruction = 2,
-    Breakpoint = 3,
-    LoadMisaligned = 4,
+enum Cause {
+    InstAlign = 0,
+    InstAccess = 1,
+    IllegalInst = 2,
+
+    Break = 3,
+
+    LoadAlign = 4,
     LoadAccess = 5,
-    StoreMisaligned = 6,
+
+    StoreAlign = 6,
     StoreAccess = 7,
-    EcallU = 8,
-    EcallS = 9,
-    InstructionPageFault = 12,
-    LoadPageFault = 13,
-    StorePageFault = 15,
 
-    Software = 1 + (1 << 63),
-    Timer = 5 + (1 << 63),
-    External = 9 + (1 << 63),
+    UCall = 8,
+    SCall = 9,
+
+    InstPage = 12,
+    LoadPage = 13,
+    StorePage = 15,
+
+    SoftInt = (1 << 63) | 1,
+    TimerInt = (1 << 63) | 5,
+    ExtInt = (1 << 63) | 9,
 }
 
-#[repr(align(4))]
-pub unsafe extern "C" fn trap_entry(s: *mut Scratch) {
-    let s = &mut *s;
-    let sepc = crate::read_csr!("sepc");
-    let scause = crate::read_csr!("scause");
-    let sepc = trap(s, sepc, core::mem::transmute::<usize, Exception>(scause));
-    crate::write_csr!("sepc", sepc);
+unsafe extern "C" fn trap_entry(regs: &mut [usize; 32]) {
+    let stval;
+    let scause: usize;
+    let sstatus: usize;
+    let sepc: usize;
+    core::arch::asm!(
+        "csrr {}, stval
+         csrr {}, scause
+         csrr {}, sstatus
+         csrr {}, sepc", out(reg) stval, out(reg) scause, out(reg) sstatus, out(reg) sepc);
+    trap(
+        stval,
+        sepc,
+        core::mem::transmute::<usize, Cause>(scause),
+        sstatus,
+        regs,
+    );
+    core::arch::asm!("csrw sepc, {}", in(reg) sepc + 4);
 }
 
-fn trap(s: &mut Scratch, sepc: usize, scause: Exception) -> usize {
-    let regs = s.regs;
-    let sstatus = crate::read_csr!("sstatus");
+fn trap(stval: usize, sepc: usize, cause: Cause, sstatus: usize, regs: &mut [usize; 32]) {
     let s_mode = (sstatus & (1 << 8)) > 0;
-    match scause {
-        Exception::InstructionMisaligned => panic!("misaligned instruction at 0x{:x}", sepc),
-        Exception::InstructionAccess => panic!("illegal instruction access at 0x{:x}", sepc),
-        Exception::IllegalInstruction => panic!("illegal instruction at 0x{:x}", sepc),
-        Exception::Breakpoint => {
-            crate::eprintln!("breakpoint at 0x {:x}", sepc);
-            crate::eprintln!("registers: {:#?}", regs);
-            sepc + 2
-        }
-        Exception::LoadMisaligned => panic!("misaligned load at 0x{:x}", sepc),
-        Exception::LoadAccess => panic!("illegal load access at 0x{:x}", sepc),
-        Exception::StoreMisaligned => panic!("misaligned store at 0x{:x}", sepc),
-        Exception::StoreAccess => panic!("illegal store access at 0x{:x}", sepc),
-
-        Exception::EcallU => {
-            let n = regs[17]; // a7
-
-            match n {
-                0 => {
-                    crate::sbi::console_putchar(regs[10] as u8);
-                }
-                64 => unsafe {
-                    let satp = &*(((s.satp & 0xfffffffffff) << 12) as *const crate::mmu::Table);
-                    let buf_addr = crate::mmu::virt_to_phys(satp, regs[11]).unwrap();
-                    core::slice::from_raw_parts(buf_addr as *const u8, regs[12]).iter().for_each(|b| {
-                        crate::sbi::console_putchar(*b);
-                    })
-                }
-                93 => panic!("syscall exit"),
-                n => crate::eprintln!("WARNING: unimplemented syscall: {}", n),
-            }
-            sepc + 4
+    if s_mode {
+        unsafe { core::arch::asm!("wfi") };
+    }
+    match cause {
+        Cause::InstAlign
+        | Cause::InstAccess
+        | Cause::IllegalInst
+        | Cause::LoadAlign
+        | Cause::LoadAccess
+        | Cause::StoreAlign
+        | Cause::StoreAccess
+        | Cause::InstPage
+        | Cause::LoadPage
+        | Cause::StorePage => {
+            panic!(
+                "trap s_mode: {}: {:?}:{:x} at {:x}: ret: {:x}",
+                s_mode, cause, stval, sepc, regs[1]
+            );
         }
 
-        Exception::InstructionPageFault => panic!("instruction page fault at 0x{:x}", sepc),
-        Exception::LoadPageFault => panic!("load page fault at 0x{:x}: 0x{:x}", sepc, crate::read_csr!("stval")),
-        Exception::StorePageFault => panic!("store page fault at 0x{:x}: 0x{:x}", sepc, crate::read_csr!("stval")),
-        Exception::Timer => {
-            crate:: eprintln!("timer");
-            crate::sbi::set_timer((crate::read_csr!("time") as u64) + 10000000);
-            sepc
+        Cause::UCall => {
+            crate::sys::syscall(regs);
         }
-        _ => todo!("{:#?}", scause as usize),
+
+        Cause::Break => todo!(),
+        _ => todo!(),
     }
 }
 
-
-#[repr(align(4096))]
-#[link_section = ".trap"]
-pub unsafe extern "C" fn k2u(entry: *const fn(), sp: *const u8, tbl: *const crate::mmu::Table) {
-    core::arch::asm!("mv t1, sp", out("t1") scratch.stack_ptr);
-    core::arch::asm!(
-        "csrw sepc, t1
-         mv sp, t2
-         csrw satp, t3
-         sfence.vma
-         sret", in("t1") entry, in("t2") sp, in("t3") ((tbl as usize) >> 12 | 8 << 60), options(noreturn));
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    eprintln!("{}", info);
+    let pc;
+    let fp;
+    unsafe {
+        let sstatus: usize;
+        core::arch::asm!(
+            "auipc {}, 0
+             csrr {}, sstatus
+             mv {}, fp", out(reg) pc, out(reg) sstatus, out(reg) fp);
+        // only stack unwind in smode faults
+        // if (sstatus & (1 << 8)) > 0 {
+        if true {
+            let fp = Frame { fp, ra: pc };
+            fp.unwind(0)
+        }
+        loop {
+            core::arch::asm!("wfi");
+        }
+    }
 }
-
-#[link_section = ".scratch"]
-pub static mut scratch: Scratch = Scratch {
-    regs: [0; 32],
-    trap_entry: 0,
-    stack_ptr: 0,
-    satp: 0
-};
-
-#[repr(C)]
-pub struct Scratch {
-    pub regs: [usize; 32],
-    pub trap_entry: usize,
-    pub stack_ptr: usize,
-    pub satp: usize,
-}
-

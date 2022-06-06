@@ -3,5 +3,44 @@
 version = 3
 
 [[package]]
+name = "earlycon"
+version = "0.1.0"
+dependencies = [
+ "limine",
+]
+
+[[package]]
+name = "elf"
+version = "0.1.0"
+dependencies = [
+ "earlycon",
+]
+
+[[package]]
+name = "fdt"
+version = "0.1.0"
+dependencies = [
+ "earlycon",
+]
+
+[[package]]
 name = "krnl"
 version = "0.1.0"
+dependencies = [
+ "earlycon",
+ "elf",
+ "fdt",
+ "rustc-demangle",
+]
+
+[[package]]
+name = "limine"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9120d12266848e9f83a2d4f97b25e7280ce112335f2a02532b7697dd660c9cb5"
+
+[[package]]
+name = "rustc-demangle"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ef03e0a2b150c7a90d01faf6254c9c48a41e95fb2a8c2ac1c6f0d2b9aefc342"

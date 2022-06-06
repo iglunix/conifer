@@ -1,121 +1,71 @@
 #![no_std]
 #![no_main]
-#![feature(naked_functions)]
 #![feature(asm_sym)]
+#![feature(naked_functions)]
 #![feature(fn_align)]
-#![feature(ptr_as_uninit)]
-#![feature(arbitrary_enum_discriminant)]
+#![feature(core_intrinsics)]
+#![feature(default_alloc_error_handler)]
 
-mod boot;
-mod earlycon;
-mod elf;
-mod init;
+#[macro_use]
+extern crate earlycon;
+extern crate elf;
+extern crate fdt;
+
+#[macro_use]
+extern crate alloc;
+
+mod heap;
 mod mmu;
-mod page;
-mod panic;
-mod sbi;
+mod proc;
+mod sys;
 mod trap;
-mod auxv;
-// mod syscall;
+
+pub const INIT_ELF: &[u8] = include_bytes!("../../init.elf");
+pub const KMEM_OFFSET: usize = 0xffffffe000000000;
+pub const UMAP_OFFSET: usize = 0x20_0000_0000;
+
+static mut FDT_SIZE: usize = 0;
+
+fn init_heap(fdt: &fdt::Fdt) {
+    let fdt_root = fdt.root();
+    unsafe {
+        FDT_SIZE = fdt.size();
+    }
+    // TODO: search for all nodes with device_type == "memory"
+    let fdt_mem = fdt_root.node("memory");
+    let fdt_mem_reg = fdt_mem.prop::<u64>("reg");
+    let pmem_start = (u64::from_be(fdt_mem_reg[0]) + 0xffffffe000000000) as *mut [u8; 4096];
+    let pmem_size = u64::from_be(fdt_mem_reg[1]) as usize;
+    let pmem = unsafe { core::slice::from_raw_parts_mut(pmem_start, pmem_size >> 12) };
+
+    heap::Heap::set_global(pmem)
+}
+
+#[no_mangle]
+unsafe extern "C" fn _start(fdt_addr: usize, krnl_elf: usize) -> ! {
+    core::arch::asm!("la t1, {}
+          csrw stvec, t1
+          csrw sie, {}",
+          sym trap::k_trap_start, in(reg) (1 << 9) | (1 << 5) | (1 << 1));
+    let fdt = fdt::Fdt::from_addr(fdt_addr);
+    trap::KRNL_ELF_ADDR = krnl_elf;
+    trap::FDT_ADDR = fdt_addr;
+    init_heap(&fdt);
+    main();
+    loop {
+        core::arch::asm!("wfi");
+    }
+}
 
 fn main() {
-    eprintln!("Conifer Micro-Kernel");
+    println!("=====================================================");
+    println!("Conifer Micro Kernel! (SPDX-License-Identifier: 0BSD)");
+    println!("=====================================================");
 
-    let mut pages = page::PageDescTable::init();
-    pages.dump();
-    let sp = pages.alloc::<[u8; 4096]>(4);
+    let mut earlyinit = proc::Proc::new();
+    let earlyinit_elf = unsafe { elf::Elf::new(INIT_ELF.as_ptr()) };
 
-    unsafe {
-        let spu = sp as *mut usize;
-        let spb = sp as *mut u8;
-        let spo = spu as usize + 4096 * 3;
-        let spu = core::slice::from_raw_parts_mut(spu, 512 * 4);
-        let spb = core::slice::from_raw_parts_mut(spb, 4096 * 4);
-        spb[4087 + 4096 * 3] = b'\0';
-        spb[4086 + 4096 * 3] = b't';
-        spb[4085 + 4096 * 3] = b'i';
-        spb[4084 + 4096 * 3] = b'n';
-        spb[4083 + 4096 * 3] = b'i';
-        spu[257 + 512 * 3] = spo + 4096 - 13;
-        spu[256 + 512 * 3] = 1;
-    }
-
-    let sp = sp as usize;
-
-    let root = unsafe {
-        pages
-            .alloc::<crate::mmu::Table>(1)
-            .as_uninit_mut()
-            .unwrap()
-            .write(crate::mmu::Table::new())
-    };
-
-    eprintln!("k2u start {:p}", trap::k2u as *const fn());
-    mmu::map(
-        &mut pages,
-        root,
-        trap::k2u as *const fn() as usize,
-        trap::k2u as *const fn() as usize,
-        mmu::Entry(0b1010),
-        0,
-    );
-
-    unsafe {
-    eprintln!("sscratch start {:p}", &trap::scratch as *const trap::Scratch);
-    mmu::map(
-        &mut pages,
-        root,
-        &trap::scratch as *const trap::Scratch as usize,
-        &trap::scratch as *const trap::Scratch as usize,
-        mmu::Entry(0b0110) | mmu::EntryFlags::Global,
-        0,
-    );
-    }
-
-    eprintln!("trap start {:p}", trap::trap_start as *const fn());
-    mmu::map(
-        &mut pages,
-        root,
-        trap::trap_start as *const fn() as usize,
-        trap::trap_start as *const fn() as usize,
-        mmu::Entry(0b1010),
-        0,
-    );
-    for i in 0..4 {
-        mmu::map(
-            &mut pages,
-            root,
-            sp + (i << 12),
-            sp + (i << 12),
-            mmu::Entry(0b0110) | mmu::EntryFlags::User,
-            0,
-        );
-    }
-
-    // unsafe {
-    //     for i in 0..((crate::boot::STACK_END - crate::boot::STACK_START + (1 << 12) - 1) >> 12) {
-    //         mmu::map(
-    //             &mut pages,
-    //             root,
-    //             crate::boot::STACK_START + (i << 12),
-    //             crate::boot::STACK_START + (i << 12),
-    //             mmu::Entry(0b0110) | mmu::EntryFlags::Global,
-    //             0,
-    //         )
-    //     }
-    // }
-    sbi::set_timer((crate::read_csr!("time") as u64) + 10000000);
-    unsafe { core::arch::asm!("wfi") };
-    
-    // eprintln!("using allocated stack pointer: {:p}", sp as *const u8);
-    let sp = sp + 2048 + 4096 * 3;
-    let sp = sp as *const u8;
-    eprintln!("using allocated stack pointer: {:p}", sp);
-    let entry = unsafe { elf::Elf::new(init::INIT_ELF.as_ptr()).load(root) };
-    eprintln!("entry: {:b}", entry);
-    eprintln!("page table: {:p}", root);
-    root.dump();
-    unsafe {
-        trap::k2u(entry as *const fn(), sp, root);
-    }
+    earlyinit.load(&earlyinit_elf);
+    earlyinit.dump();
+    earlyinit.switch();
 }

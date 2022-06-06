@@ -2,3 +2,14 @@
 *.elf
 */target
 /usr
+# copied from the linux kernel
+okapi
+*.elf*
+qemu
+*.tar
+*.cpio
+krnl-old
+hello
+fsd-temp
+initrd
+util/*/target
