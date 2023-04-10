@@ -1,0 +1,7 @@
+#!/bin/sh -e
+
+cat > cfg.mk << EOF
+LIBCC=$(cc --print-libgcc-file-name --target=riscv64-linux-musl)
+RUST_SRC=$(rustc --print sysroot)/lib/rustlib/src/library
+PWD=$(pwd)
+EOF

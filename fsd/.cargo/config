@@ -1,3 +1,0 @@
-[target.riscv64-linux-musl.json]
-linker="ld"
-linker-args="--sysroot=/usr/riscv64-linux-musl/ -v"

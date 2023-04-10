@@ -1,88 +1,37 @@
-MODE=release
-ARCH=riscv64
-# ARCH=x86_64
+.POSIX:
 
-.PHONY: hello.elf
+include cfg.mk
 
-all: krnl.elf init.elf
+RUST_TARGET=riscv64.json
+C_TARGET=riscv64-linux-musl
 
-include util/$(ARCH).mk
-TARGET=../util/$(_T).json
-CARGO_FLAGS=-Zbuild-std -Zbuild-std-features=compiler-builtins-mem --target=$(TARGET)
+RUSTC=rustc
+RUSTC_FLAGS=-Lout --edition 2021 --target $(RUST_TARGET)
+RUST_LIBS=out/libcompiler_builtins.rlib out/libcore.rlib
 
-# K_RFLAGS=-C link-args=--image-base=0xffffffc000000000 -Cforce-frame-pointers=yes
-H_RFLAGS=-C link-args=--image-base=0xffffffff80000000 -Cforce-frame-pointers=yes
-hello.elf:
-	cd hello; RUSTFLAGS='$(H_RFLAGS)' cargo build $(CARGO_FLAGS)
-	cp hello/target/$(_T)/debug/hello hello.elf
+out/boot.elf: boot/main.rs $(RUST_LIBS) out/libcon.rlib boot/riscv64.ld out/krnl.elf out/libelf.rlib out/libfdt.rlib
+	rustc $(RUSTC_FLAGS) boot/main.rs --crate-name boot -C link-arg="-Tboot/riscv64.ld" -o $@
 
-fsd.elf.release:
-	cd fsd; RUSTFLAGS='-C target-feature=+crt-static -C link-args=--sysroot=/usr/riscv64-linux-musl/ -C link-args=-v -C link-arg=/usr/lib/clang/14.0.1/lib/linux/libclang_rt.builtins-riscv64.a -C link-args=--target=riscv64-linux-musl' cargo build --target=riscv64-linux-musl.json -Zbuild-std --release
-fsd.elf.debug:
-	cd fsd; RUSTFLAGS='-C target-feature=+crt-static -C link-args=--sysroot=/usr/riscv64-linux-musl/ -C link-args=-v -C link-arg=/usr/lib/clang/14.0.1/lib/linux/libclang_rt.builtins-riscv64.a -C link-args=--target=riscv64-linux-musl' cargo build --target=riscv64-linux-musl.json -Zbuild-std
-# fsd.elf: fsd.elf.$(MODE)
-# 	cp fsd/target/riscv64-linux-musl/$(MODE)/fsd fsd.elf
-# fsd.elf: fsd.elf.$(MODE)
-# 	cp fsd/target/riscv64-linux-musl/$(MODE)/fsd fsd.elf
+out/krnl.elf: krnl/main.rs $(RUST_LIBS) out/libcon.rlib out/libfdt.rlib out/liballoc.rlib
+	rustc $(RUSTC_FLAGS) krnl/main.rs --crate-name krnl -C link-arg="--image-base=0xffffffc000000000" -o $@
 
+out/libelf.rlib: $(RUST_LIBS) lib/elf.rs
+	rustc $(RUSTC_FLAGS) --crate-type rlib lib/elf.rs --crate-name elf -o $@
 
-# fsd.elf: fsd.elf.debug
-# 	cp fsd/target/riscv64-linux-musl/debug/fsd fsd.elf
+out/libcon.rlib: $(RUST_LIBS) lib/con.rs
+	rustc $(RUSTC_FLAGS) --crate-type rlib lib/con.rs --crate-name con -o $@
 
-# fsd.elf: fsd.elf.temp
-# 	cp fsd.elf.temp fsd.elf
+out/libfdt.rlib: $(RUST_LIBS) lib/fdt.rs
+	rustc $(RUSTC_FLAGS) --crate-type rlib lib/fdt.rs --crate-name fdt -o $@
 
-fsd.elf:
-	cp toybox fsd.elf
+out/libcompiler_builtins.rlib: out/libcore.rlib lib/compiler_builtins.rs
+	rustc $(RUSTC_FLAGS) --crate-type rlib lib/compiler_builtins.rs --crate-name compiler_builtins -o $@
 
-fsd.elf.temp: fsd-temp/main.c
-	cc --target=riscv64-linux-musl --sysroot=/usr/riscv64-linux-musl fsd-temp/main.c -o fsd.elf.temp -static
+out/libcore.rlib:
+	rustc $(RUSTC_FLAGS) --crate-type rlib /usr/lib/rustlib/src/rust/library/core/src/lib.rs --crate-name core -o $@
 
-initrd.tar: fsd.elf
-	tar -cf initrd.tar fsd.elf
+out/liballoc.rlib: out/libcore.rlib
+	rustc $(RUSTC_FLAGS) --crate-type rlib /usr/lib/rustlib/src/rust/library/alloc/src/lib.rs --crate-name alloc -o $@
 
-vdso.so.debug:
-	cd vdso; cargo build --target=riscv64gc-unknown-none-elf -Zbuild-std
-	
-init.elf.debug:
-	cd init; RUSTFLAGS='-Cforce-frame-pointers=yes' cargo build $(CARGO_FLAGS)
-init.elf.release:
-	cd init; RUSTFLAGS='-Cforce-frame-pointers=yes' cargo build $(CARGO_FLAGS) --release
-init.elf: init.elf.$(MODE)
-	cp init/target/$(_T)/$(MODE)/init init.elf
-init.fmt:
-	cd init; cargo fmt
-
-K_RFLAGS=-C link-args=--image-base=0xffffffc000000000 -Cforce-frame-pointers=yes
-krnl.elf.debug: init.elf
-	cd krnl; RUSTFLAGS='$(K_RFLAGS)' cargo build $(CARGO_FLAGS)
-krnl.elf.release: init.elf
-	cd krnl; RUSTFLAGS='$(K_RFLAGS)' cargo build $(CARGO_FLAGS) --release
-krnl.elf: krnl.elf.$(MODE)
-	cp krnl/target/$(_T)/$(MODE)/krnl krnl.elf
-krnl.fmt:
-	cd krnl; cargo fmt
-# krnl.map: krnl.elf
-# 	nm -C krnl.elf > krnl.map
-
-boot.elf.debug: krnl.elf
-	cd boot; cargo build $(CARGO_FLAGS)
-boot.elf.release: krnl.elf
-	cd boot; cargo build $(CARGO_FLAGS) --release
-boot.elf: boot.elf.$(MODE)
-	cp boot/target/$(_T)/$(MODE)/boot boot.elf
-boot.fmt:
-	cd boot; cargo fmt
-
-fmt: boot.fmt krnl.fmt init.fmt
-
-qemu: boot.elf initrd.tar
-	qemu-system-riscv64 -kernel boot.elf -serial mon:stdio -nographic -m 1024 -M virt -vga virtio -initrd initrd.tar -append init=/sbin/init
-
-uqemu: hello.elf
-	cp /usr/share/limine/BOOTX64.EFI qemu/
-	cp hello.elf qemu/
-	qemu-system-x86_64 -hda fat:rw:qemu \
-	-bios ~/Documents/Programming/oslo/fw/x64/OVMF.fd \
-	-net none -kernel qemu/BOOTX64.EFI -serial mon:stdio \
-	-enable-kvm -m 1024 --no-reboot -d int -D qemulog.log
+qemu: out/boot.elf
+	qemu-system-riscv64 -kernel out/boot.elf -nographic -m 2048
