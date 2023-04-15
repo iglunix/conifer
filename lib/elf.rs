@@ -110,7 +110,7 @@ pub struct ProgramHeader {
 }
 
 #[repr(u32)]
-#[derive(Debug,Clone,Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum ShType {
     Null = 0,
     ProgBits = 1,
@@ -140,7 +140,7 @@ pub struct SectionHeader {
     link: u32,
     info: u32,
     addralign: usize,
-    entsize: usize
+    entsize: usize,
 }
 
 #[repr(C)]
@@ -151,14 +151,14 @@ pub struct SymTabEnt {
     pub other: u8,
     pub shndx: u16,
     pub value: usize,
-    pub size: u64
+    pub size: u64,
 }
 
 #[derive(Debug)]
 pub struct Elf<'a> {
     pub head: &'a ElfHeader,
     pub phdrs: &'a [ProgramHeader],
-    pub shdrs: &'a [SectionHeader]
+    pub shdrs: &'a [SectionHeader],
 }
 
 impl<'a> Elf<'a> {
@@ -181,7 +181,7 @@ impl<'a> Elf<'a> {
 
         let shdrs = core::slice::from_raw_parts(
             (bytes.offset(head.shoff as isize)) as *const SectionHeader,
-            head.shnum as usize
+            head.shnum as usize,
         );
 
         Self { head, phdrs, shdrs }

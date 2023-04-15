@@ -51,11 +51,41 @@ macro_rules! eprintln {
     ($($arg:tt)*) => ($crate::eprint!("{}\n", format_args!($($arg)*)));
 }
 
+#[repr(C)]
+#[derive(Debug)]
+struct Frame {
+    fp: *const Frame,
+    ra: usize,
+}
+
+impl Frame {
+    pub unsafe fn unwind(&self, idx: usize) {
+        // let krnl_elf = elf::Elf::new(KRNL_ELF_ADDR as *const u8);
+
+        if self.fp as usize > 0xffffff0000000000 {
+            eprintln!("{:x}", self.ra);
+            // let sym = find_symbol(self.ra);
+            // let sym = rustc_demangle::demangle(sym);
+            // eprintln!("{:>4}: {}", idx, sym);
+            // eprintln!("             at {:x}", self.ra);
+            (*self.fp.offset(-1)).unwind(idx + 1)
+        }
+    }
+}
+
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    eprintln!("{}", info);
-    loop {
-        unsafe {
+    unsafe {
+        core::arch::asm!("csrw sie, x0");
+        eprintln!("{}", info);
+        let fp;
+        let pc;
+        core::arch::asm!(
+            "auipc {}, 0
+             mv {}, fp", out(reg) pc, out(reg) fp);
+        let fp = Frame { fp, ra: pc };
+        fp.unwind(0);
+        loop {
             core::arch::asm!("wfi");
         }
     }

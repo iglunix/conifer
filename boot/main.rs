@@ -12,7 +12,7 @@ extern crate fdt;
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct PageTblEntry(u64);
-impl  PageTblEntry {
+impl PageTblEntry {
     const fn new() -> Self {
         Self(0)
     }
@@ -149,7 +149,7 @@ fn boot_start() -> usize {
 }
 
 fn boot_end() -> usize {
-    unsafe { 0x80100000 }
+    unsafe { 0x80400000 }
 }
 
 fn reserve_pages() {
@@ -219,7 +219,7 @@ enum Prot {
     Ro = 0b001,
     Rw = 0b011,
     Rx = 0b101,
-    Rwx = 0b111
+    Rwx = 0b111,
 }
 
 fn map(paddr: usize, vaddr: usize, read: bool, write: bool, exec: bool) {
@@ -286,23 +286,30 @@ fn map_kernel() -> usize {
                 let base_paddr_aligned = base_paddr & !0xfff;
                 let base_vaddr = hdr.vaddr;
                 let base_vaddr_aligned = base_vaddr & !0xfff;
-                assert_eq!(base_paddr & 0xfff, base_vaddr & 0xfff);
+                //assert_eq!(base_paddr & 0xfff, base_vaddr & 0xfff);
+                eprintln!("mapping: {:x} to {:x}", base_paddr, base_vaddr);
                 let file_len = ((base_paddr & 0xfff) + (hdr.filesz + 0xfff)) >> 12;
                 let mem_len = ((base_vaddr & 0xfff) + (hdr.memsz + 0xfff)) >> 12;
                 for i in 0..file_len {
                     map(
-                        base_paddr_aligned + (i << 12), base_vaddr_aligned + (i << 12),
+                        base_paddr_aligned + (i << 12),
+                        base_vaddr_aligned + (i << 12),
                         (hdr.pflags & 0x4) > 0,
                         (hdr.pflags & 0x2) > 0,
-                        (hdr.pflags & 0x1) > 0
+                        (hdr.pflags & 0x1) > 0,
                     );
                 }
                 for i in file_len..mem_len {
+                    let p = alloc_page();
+
+                    reserve_page((p - 0x80000000) >> 12);
+
                     map(
-                        zero_paddr(), base_vaddr_aligned + (i << 12),
+                        p,
+                        base_vaddr_aligned + (i << 12),
                         (hdr.pflags & 0x4) > 0,
                         (hdr.pflags & 0x2) > 0,
-                        (hdr.pflags & 0x1) > 0
+                        (hdr.pflags & 0x1) > 0,
                     );
                 }
             }
@@ -317,12 +324,18 @@ fn map_stack() {
     println!("Mapping stack");
     // Kernel stack goes right at the top of virtual memory
     //let stack_end = 0xffffffff_fffff000;
-    let stack_end : usize = 0;
-    let stack_len : usize = unsafe { STACK.0.len() };
-    let stack_start : usize = stack_end.wrapping_sub(stack_len);
+    let stack_end: usize = 0;
+    let stack_len: usize = unsafe { STACK.0.len() };
+    let stack_start: usize = stack_end.wrapping_sub(stack_len);
     let paddr = unsafe { STACK.0.as_ptr() } as usize;
     for i in 0..(stack_len >> 12) {
-        map(paddr + (i << 12), stack_start + (i << 12), true, true, false);
+        map(
+            paddr + (i << 12),
+            stack_start + (i << 12),
+            true,
+            true,
+            false,
+        );
     }
     println!("Mapped stack");
 }
@@ -366,13 +379,18 @@ fn physical_memory_span(fdt: &fdt::Fdt) -> (usize, usize) {
     assert_eq!(device_type, "memory");
     let mem_start = u64::from_be_bytes(reg[0..8].try_into().unwrap());
     let mem_len = u64::from_be_bytes(reg[8..16].try_into().unwrap());
-    eprintln!("Physical memory spans: {:x} -> {:x}", mem_start, mem_start + mem_len);
+    eprintln!(
+        "Physical memory spans: {:x} -> {:x}",
+        mem_start,
+        mem_start + mem_len
+    );
 
     (mem_start as usize, (mem_start + mem_len) as usize)
 }
 
 fn main(fdt_addr: usize) {
     let fdt = unsafe { fdt::Fdt::from_addr(fdt_addr) };
+    fdt.root().dump();
     physical_memory_span(&fdt);
 
     reserve_pages();
@@ -380,10 +398,14 @@ fn main(fdt_addr: usize) {
     map_stack();
     map_buddy();
     map(
-        boot as *const () as usize, boot as *const () as usize,
-        true, false, true
+        boot as *const () as usize,
+        boot as *const () as usize,
+        true,
+        false,
+        true,
     );
-    boot(entry, fdt_addr, unsafe { &mut BUDDY } as *mut Buddy as usize);
+    boot(entry, fdt_addr, unsafe { &mut BUDDY } as *mut Buddy
+        as usize);
 }
 
 #[no_mangle]

@@ -1,4 +1,6 @@
 #![feature(naked_functions)]
+#![feature(fn_align)]
+#![feature(once_cell)]
 #![no_std]
 #![no_main]
 
@@ -14,7 +16,7 @@ struct Mapping {
     read: bool,
     write: bool,
     exec: bool,
-    user: bool
+    user: bool,
 }
 
 struct Map();
@@ -25,283 +27,11 @@ struct Mem {
     local_map: Map,
 
     // Mappings
-    global_map: Map
+    global_map: Map,
 }
 
-struct Task {
-
-}
-
-// 15 buddy levels means 2^15 * 8 pages which means 1gb of ram
-// 2^32 entries
-//
-// 16: 1111_0000
-// 15: 11111111_10100000
-// 14: 1111111111111111_1110111010100000
-struct Buddy {
-    // buddy_bases: [*mut u8; 15],
-    // // shift 1 << base_buddy_size
-    // // since base size is always a power of 2
-    // base_buddy_size: u8,
-    buddies: [&'static mut [u8]; 16]
-}
-
-impl Buddy {
-    fn init() -> Self {
-        let mut ret = Self::get();
-
-        // Fill in buddies 1..16 with information
-        for i in 1..16 {
-            println!("level: {:x}", ret.level_len(i));
-            for j in 0..ret.level_len(i) {
-                let j20 = (j << 1) + 0;
-                let j21 = (j << 1) + 1;
-                if ret.bud_get(i - 1, j20) && ret.bud_get(i - 1, j21) {
-                    ret.bud_set(i, j, true);
-                } else {
-                    ret.bud_set(i, j, false);
-                }
-            }
-        }
-        let mut start = None;
-        for i in 0..ret.level_len(0) {
-            if ret.bud_get(0, i) {
-                if start.is_none() {
-                    start = Some(i << 12);
-                }
-            } else {
-                if start.is_some() {
-                    println!("reserved: {:x}->{:x}", start.unwrap() + 0x80000000, (i << 12) + 0x80000000);
-                    start = None
-                }
-            }
-        }
-
-        ret
-    }
-
-    fn get() -> Self {
-        let base = 0xffffffff_00000000_usize;
-        let base_len = 1 << 15;
-
-        let buddies: [&'static mut [u8]; 16] = core::array::from_fn(|i| {
-            let addr = base + ((base_len - (base_len >> (i))) << 1);
-            let addr = addr as *mut u8;
-            let len = base_len >> i;
-
-            unsafe { core::slice::from_raw_parts_mut(addr, len) }
-        });
-
-        Self {
-            buddies
-        }
-    }
-
-    // idx is the local idx not idx into base buddy
-    fn bud_get(&self, level: usize, idx: usize) -> bool {
-        let block = self.buddies[level][idx >> 3]; // divide by 8 since we fit 8 bits ina block
-        (block & (1 << (idx & 0b111))) > 0
-    }
-
-    fn bud_set(&mut self, level: usize, idx: usize, val: bool) {
-        let block = &mut self.buddies[level][idx >> 3]; // divide by 8 since we fit 8 bits ina block
-        if val {
-           *block = *block | (1 << (idx & 0b111));
-        } else {
-           *block = *block & !(1 << (idx & 0b111));
-        }
-    }
-
-    fn level_len(&self, level: usize) -> usize {
-        (self.buddies[0].len() * 8) >> level
-    }
-
-    fn alloc(&mut self) -> usize {
-        let mut page_idx = 0;
-        let mut level = 15;
-
-        while level > 0 {
-            if self.bud_get(level, page_idx) {
-                page_idx += 1;
-                if page_idx == self.level_len(level) {
-                    panic!("OOM: {}:{:x}:{:#?}", level, page_idx, &self.buddies[1][0..16]);
-                }
-            } else {
-                level -= 1;
-                page_idx = page_idx << 1;
-            }
-        }
-        let ret = page_idx << 12;
-
-        self.bud_set(level, page_idx, true);
-        page_idx = page_idx >> 1;
-        level += 1;
-        while level < self.buddies.len() {
-            let j20 = (page_idx << 1) + 0;
-            let j21 = (page_idx << 1) + 1;
-            if self.bud_get(level - 1, j20) && self.bud_get(level - 1, j21) {
-                self.bud_set(level, page_idx, true);
-            }
-            level += 1;
-            page_idx = page_idx >> 1;
-        }
-
-        0x80000000 + ret
-    }
-
-    fn free(&mut self, addr: usize) {
-        let addr = addr - 0x80000000;
-        let mut page_idx = addr >> 12;
-        let mut level = 0;
-
-        if !self.bud_get(level, page_idx) {
-            eprintln!("Double Free Detected!");
-        }
-        self.bud_set(level, page_idx, false);
-        page_idx = page_idx >> 1;
-        level += 1;
-        while level < self.buddies.len() {
-            let j20 = (page_idx << 1) + 0;
-            let j21 = (page_idx << 1) + 1;
-            if !(self.bud_get(level - 1, j20) && self.bud_get(level - 1, j21)) {
-                self.bud_set(level, page_idx, false);
-            }
-            level += 1;
-            page_idx = page_idx >> 1;
-        }
-    }
-}
-
-static mut HEAP_BF: [u8; 0x100] = [0; 0x100];
-struct TinyAlloc;
-#[global_allocator]
-static GLOBAL: TinyAlloc = TinyAlloc;
-unsafe impl alloc::alloc::GlobalAlloc for TinyAlloc {
-    unsafe fn alloc(&self, layout: alloc::alloc::Layout) -> *mut u8 {
-        let heap_bf = unsafe { &mut HEAP_BF };
-        // No allocations can be larger than 128 MiB
-        if layout.size() > (1 << 27) {
-            panic!("Allocation too big");
-        }
-        let req_pages = (layout.size() + 0xfff) >> 12;
-        let mut free_block = 0;
-        while heap_bf[free_block] == 255 && free_block < heap_bf.len()  {
-            free_block += 1
-        }
-
-        let mut idx = 0;
-        while (((heap_bf[free_block] >> idx) & 1) == 0b1)  && idx < 8 {
-            idx += 1
-        }
-        heap_bf[free_block] |= 1 << idx;
-        idx |= free_block << 3;
-
-        let addr = (idx << 27) + 0xffffffd0_00000000_usize;
-        let mut buddy = Buddy::get();
-        for i in 0..req_pages {
-            buddy.alloc();
-            // todo: map
-        }
-
-        println!("alloc addr {:x}", addr);
-        addr as *mut u8
-    }
-
-    unsafe fn realloc(&self, addr: *mut u8, layout: alloc::alloc::Layout, new_size: usize) -> *mut u8 {
-        // We can always realloc in place. just need to alloc and map more pages
-        addr
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: alloc::alloc::Layout) {
-        let addr = ptr as usize;
-        let addr = addr - 0xffffffd0_00000000_usize;
-        let idx = addr >> 27;
-        let block_idx = idx >> 3;
-        let idx = idx & 0b11;
-        let heap_bf = unsafe { &mut HEAP_BF };
-        heap_bf[block_idx] &= !(1 << idx);
-        // TODO: lookup paddr in page table and dealloc
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PageTblEntry(u64);
-impl  PageTblEntry {
-    const fn new() -> Self {
-        Self(0)
-    }
-
-    fn set_addr(&mut self, paddr: usize) {
-        // 56 bit paddr
-        let paddr = paddr & ((1 << 56) - 1);
-        // 12 bit page offset
-        let paddr = paddr >> 12;
-        self.0 &= !(((1 << 44) - 1) << 10);
-        self.0 |= (paddr as u64) << 10;
-    }
-
-    fn addr(&self) -> usize {
-        ((self.0 & (((1 << 56) - 1) << 10)) << 2) as usize
-    }
-
-    fn set_global(&mut self, global: bool) {
-        if global {
-            self.0 |= 1 << 5;
-        } else {
-            self.0 &= !(1 << 5);
-        }
-    }
-
-    fn set_user(&mut self, user: bool) {
-        if user {
-            self.0 |= 1 << 4;
-        } else {
-            self.0 &= !(1 << 4);
-        }
-    }
-
-    fn set_exec(&mut self, exec: bool) {
-        if exec {
-            self.0 |= 1 << 3;
-        } else {
-            self.0 &= !(1 << 3);
-        }
-    }
-
-    fn set_write(&mut self, write: bool) {
-        if write {
-            self.0 |= 1 << 2;
-        } else {
-            self.0 &= !(1 << 2);
-        }
-    }
-
-    fn set_read(&mut self, read: bool) {
-        if read {
-            self.0 |= 1 << 1;
-        } else {
-            self.0 &= !(1 << 1);
-        }
-    }
-
-    fn set_valid(&mut self, valid: bool) {
-        if valid {
-            self.0 |= 1 << 0;
-        } else {
-            self.0 &= !(1 << 0);
-        }
-    }
-
-    fn valid(&self) -> bool {
-        (self.0 & 1) > 0
-    }
-}
-
-#[repr(C)]
-#[repr(align(0x1000))]
-#[derive(Clone)]
-struct PageTbl([PageTblEntry; 0x200]);
+mod buddy;
+mod trap;
 
 #[no_mangle]
 #[naked]
@@ -322,14 +52,194 @@ extern "C" fn entry(fdt_addr: usize, buddy_addr: usize) {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct Context {
+    pc: usize, // pc
+    ra: usize, // x1
+    sp: usize, // x2
+    gp: usize, // x3
+    tp: usize, // x4
+    t0: usize, // x5
+    t1: usize, // x6
+    t2: usize, // x7
+    s0: usize, // x8
+    s1: usize, // x9
+    a0: usize, // x10
+    a1: usize, // x11
+    a2: usize, // x12
+    a3: usize, // x13
+    a4: usize, // x14
+    a5: usize, // x15
+    a6: usize, // x16
+    a7: usize, // x17
+    s2: usize, // x18
+    s3: usize, // x19
+    s4: usize, // x20
+    s5: usize, // x21
+    s6: usize, // x22
+    s7: usize, // x23
+    s8: usize, // x24
+    s9: usize, // x25
+    s10: usize,// x26
+    s11: usize,// x27
+    t3: usize, // x28
+    t4: usize, // x29
+    t5: usize, // x30
+    t6: usize, // x31
+}
+
+impl Context {
+    const fn default() -> Self {
+        Self {
+            pc: 0, // pc/sepc
+            ra: 0, // x1
+            sp: 0, // x2
+            gp: 0, // x3
+            tp: 0, // x4
+            t0: 0, // x5
+            t1: 0, // x6
+            t2: 0, // x7
+            s0: 0, // x8
+            s1: 0, // x9
+            a0: 0, // x10
+            a1: 0, // x11
+            a2: 0, // x12
+            a3: 0, // x13
+            a4: 0, // x14
+            a5: 0, // x15
+            a6: 0, // x16
+            a7: 0, // x17
+            s2: 0, // x18
+            s3: 0, // x19
+            s4: 0, // x20
+            s5: 0, // x21
+            s6: 0, // x22
+            s7: 0, // x23
+            s8: 0, // x24
+            s9: 0, // x25
+            s10: 0,// x26
+            s11: 0,// x27
+            t3: 0, // x28
+            t4: 0, // x29
+            t5: 0, // x30
+            t6: 0, // x31
+        }
+    }
+}
+
+/*
+#[naked]
+unsafe extern "C" fn ctx_switch(old: &mut Context, new: &mut Context) {
+    unsafe {
+        core::arch::asm!(
+            "sd ra, 0(a0)
+         sd sp, 8(a0)
+         sd s0, 16(a0)
+         sd s1, 24(a0)
+         sd s2, 32(a0)
+         sd s3, 40(a0)
+         sd s4, 48(a0)
+         sd s5, 56(a0)
+         sd s6, 64(a0)
+         sd s7, 72(a0)
+         sd s8, 80(a0)
+         sd s9, 88(a0)
+         sd s10, 96(a0)
+         sd s11, 104(a0)
+
+         ld ra, 0(a1)
+         ld sp, 8(a1)
+         ld s0, 16(a1)
+         ld s1, 24(a1)
+         ld s2, 32(a1)
+         ld s3, 40(a1)
+         ld s4, 48(a1)
+         ld s5, 56(a1)
+         ld s6, 64(a1)
+         ld s7, 72(a1)
+         ld s8, 80(a1)
+         ld s9, 88(a1)
+         ld s10, 96(a1)
+         ld s11, 104(a1)
+         ret
+         ",
+            options(noreturn)
+        );
+    }
+}
+*/
+
+const MAX_TASKS: usize = 3;
+const STACK_SIZE: usize = 4096;
+// TODO: thread local
+static mut CUR_TASK: Task = Task(0);
+static mut LAST_TASK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static mut TASK_STACKS: [[usize; STACK_SIZE]; MAX_TASKS] = [[0; STACK_SIZE]; MAX_TASKS];
+static mut TASK_CTX: [Context; MAX_TASKS] = [Context::default(); MAX_TASKS];
+// keep track of what tasks are running. we cant run the same task in parallel
+// all tasks are initially set as if they were running. this is so they can't be scheduled
+// until they have been created
+#[derive(Clone, Copy, Debug)]
+struct Task(usize);
+
+impl Task {
+    fn new(task: *const ()) -> Self {
+        unsafe {
+            let tid = LAST_TASK.fetch_add(1, core::sync::atomic::Ordering::SeqCst) + 1;
+            TASK_CTX[tid].pc = task as usize;
+            TASK_CTX[tid].sp = TASK_STACKS[tid].as_mut_ptr().add(TASK_STACKS[tid].len() - 1) as usize;
+            eprintln!("sp: {:p}", TASK_STACKS[tid].as_mut_ptr());
+            Self(tid)
+        }
+    }
+
+    fn current() -> Self {
+        unsafe { CUR_TASK }
+    }
+
+    fn switch(self) {
+        unsafe {
+            panic!();
+            eprintln!("switching to: {}", self.0);
+            let old = &mut TASK_CTX[CUR_TASK.0];
+            CUR_TASK = self;
+            let new = &mut TASK_CTX[CUR_TASK.0];
+            eprintln!("{:#?}", new);
+            // ctx_switch(old, new);
+        }
+    }
+}
+
+fn task1() {
+    unsafe {
+        loop {
+            println!("Hi from task 1");
+            core::arch::asm!("wfi")
+        }
+    }
+}
+
 fn main() {
+    trap::init();
     // initialise the buddy allocator
-    let mut buddy = Buddy::init();
+    let mut buddy = buddy::Buddy::init();
     let addr = buddy.alloc();
     buddy.free(addr);
 
-    let mut s = alloc::string::String::new();
-    s.push('a');
-    s.push('b');
-    s.push('c');
+    // TODO: fix boot not 0 init
+    unsafe {
+        CUR_TASK = Task(0);
+        LAST_TASK = core::sync::atomic::AtomicUsize::new(0);
+    }
+    let t = Task::new(task1 as *const ());
+
+    unsafe { trap::timer(); }
+
+    unsafe {
+        loop {
+            println!("Hi from task 0");
+            core::arch::asm!("wfi")
+        }
+    }
 }

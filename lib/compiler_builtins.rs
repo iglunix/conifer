@@ -27,7 +27,10 @@ pub unsafe extern "C" fn memcpy(s1: *mut u8, s2: *const u8, n: usize) -> *mut u8
 
 #[no_mangle]
 pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
-    let (div, rem) = (n / core::mem::size_of::<usize>(), n % core::mem::size_of::<usize>());
+    let (div, rem) = (
+        n / core::mem::size_of::<usize>(),
+        n % core::mem::size_of::<usize>(),
+    );
     let mut a = s1 as *const usize;
     let mut b = s2 as *const usize;
     for _ in 0..div {
@@ -49,10 +52,30 @@ pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
     let mut b = b as *const u8;
     for _ in 0..rem {
         if *a != *b {
-            return *a as i32- *b as i32;
+            return *a as i32 - *b as i32;
         }
         a = a.offset(1);
         b = b.offset(1);
     }
     0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn memmove(s1: *mut u8, s2: *const u8, n: usize) -> *mut u8 {
+    if s2 < s1 as *const u8 {
+        // copy from end
+        let mut i = n;
+        while i != 0 {
+            i -= 1;
+            *(s1 as *mut u8).add(i) = *(s2 as *const u8).add(i);
+        }
+    } else {
+        // copy from beginning
+        let mut i = 0;
+        while i < n {
+            *(s1 as *mut u8).add(i) = *(s2 as *const u8).add(i);
+            i += 1;
+        }
+    }
+    s1
 }

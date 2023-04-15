@@ -37,7 +37,9 @@ impl FdtNode {
 
                 while match name.next() {
                     Some(b) if b == b'@' && b == unsafe { *sptr.offset(j) } => {
-                        while unsafe { *sptr.offset(j) } != 0 { j += 1 }
+                        while unsafe { *sptr.offset(j) } != 0 {
+                            j += 1
+                        }
                         return Self {
                             structs: &self.structs[(i + ((j as usize + 3) >> 2) + 1)..],
                             strings: self.strings,
