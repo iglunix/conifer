@@ -166,7 +166,7 @@ fn reserve_pages() {
     // those pages will ever be needed again. We do however reuse the stack
     // (though resetting the sp to the top again) so we do mark those pages.
     println!("Reserving SBI pages");
-    for i in 0..32 {
+    for i in 0..512 {
         reserve_page(i);
     }
     println!("Reserving buddy pages");
@@ -389,6 +389,7 @@ fn physical_memory_span(fdt: &fdt::Fdt) -> (usize, usize) {
 }
 
 fn main(fdt_addr: usize) {
+    eprintln!("Bootstub loaded");
     let fdt = unsafe { fdt::Fdt::from_addr(fdt_addr) };
     fdt.root().dump();
     physical_memory_span(&fdt);

@@ -6,7 +6,7 @@ RUST_TARGET=riscv64.json
 C_TARGET=riscv64-linux-musl
 
 RUSTC=rustc
-RUSTC_FLAGS=-Lout --edition 2021 --target $(RUST_TARGET) -O -g -C force-frame-pointers=yes
+RUSTC_FLAGS=-Lout --edition 2021 --target $(RUST_TARGET) -O -g -C force-frame-pointers=yes -C relocation-model=pic
 RUST_LIBS=out/libcompiler_builtins.rlib out/libcore.rlib
 
 out/boot.elf: boot/main.rs $(RUST_LIBS) out/libcon.rlib boot/riscv64.ld out/krnl.elf out/libelf.rlib out/libfdt.rlib
@@ -46,3 +46,4 @@ clean:
 
 qemu: out/boot.elf
 	qemu-system-riscv64 -kernel out/boot.elf -nographic -m 2048
+	#qemu-system-riscv64 -kernel out/boot.elf -nographic -m 2048
