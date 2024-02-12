@@ -1,0 +1,36 @@
+#!/bin/sh -e
+: > cfg.mk
+
+cfg_cmd() {
+	printf 'checking %s... ' "$1"
+	shift
+	VAR="$1"
+	shift
+	if command -V "$1" 2>/dev/null >/dev/null
+	then
+		printf '%s\n' "$1"
+		printf '%s%s\n' "$VAR" "$1" >> cfg.mk
+	else
+		printf 'no\n'
+		false
+	fi
+}
+
+cfg_set() {
+	printf 'checking %s... ' "$1"
+	shift
+	VAR="$1"
+	shift
+	if "$@" 2>/dev/null > /dev/null
+	then
+		"$@" | xargs printf '%s\n'
+		"$@" | xargs printf '%s%s\n' "$VAR" >> cfg.mk
+	else
+		printf 'no\n'
+		false
+	fi
+}
+
+cfg_cmd "for Rust compiler" "RUSTC=RUSTC_BOOTSTRAP=1 " rustc
+cfg_set "Rust sysroot" "RUST_SYSROOT=" rustc --print sysroot
+printf 'OBJCOPY=llvm-objcopy\n' >> cfg.mk
