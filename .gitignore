@@ -1,0 +1,4 @@
+*.bin
+*.rlib
+init
+krnl
