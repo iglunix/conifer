@@ -1,5 +1,12 @@
 // can take memory cap when starting new hart to use as kernel stack.
 
+use crate::abi;
+use crate::abi::SysError;
+use crate::abi::Syscall;
+use crate::rwlock::RwLock;
+
+use core::marker::PhantomData;
+
 pub fn wait() {
     unsafe { core::arch::asm!("wfi") }
 }
@@ -21,9 +28,9 @@ pub fn set_time(time: usize) {
 }
 
 fn enable_timer() {
-	unsafe {
-		core::arch::asm!("csrs sie, {}", in(reg) 0x20);
-	}
+    unsafe {
+        core::arch::asm!("csrs sie, {}", in(reg) 0x20);
+    }
 }
 
 // fn enable_interrupts() {
@@ -60,6 +67,12 @@ impl<const LEVEL: usize> PageTableEntry<LEVEL> {
     fn prot(&self) -> usize {
         (self.0 >> 1) & 0b1111
     }
+
+    fn invalidate(&mut self) -> CapRef<Mem> {
+        let paddr = self.addr();
+        self.0 = self.0 & !1;
+        CapRef::<Mem>::new(core::ptr::from_exposed_addr_mut(paddr), PAGE_SIZE)
+    }
 }
 
 impl<const LEVEL: usize> core::fmt::Debug for PageTableEntry<LEVEL> {
@@ -73,24 +86,72 @@ impl<const LEVEL: usize> core::fmt::Debug for PageTableEntry<LEVEL> {
 }
 
 impl PageTableEntry<2> {
-    fn next_table(&mut self) -> &mut PageTable<1> {
+    fn try_next_table_mut(&mut self) -> Option<&mut PageTable<1>> {
+        if self.valid() {
+            Some(self.next_table_mut())
+        } else {
+            None
+        }
+    }
+
+    fn try_next_table(&self) -> Option<&PageTable<1>> {
+        if self.valid() {
+            Some(self.next_table())
+        } else {
+            None
+        }
+    }
+
+    fn next_table_mut(&mut self) -> &mut PageTable<1> {
         unsafe { &mut *(pmem_map().add(self.addr()) as *mut PageTable<1>) }
+    }
+
+    fn next_table(&self) -> &PageTable<1> {
+        unsafe { &*(pmem_map().add(self.addr()) as *const PageTable<1>) }
     }
 }
 
 impl PageTableEntry<1> {
-    fn next_table(&mut self) -> &mut PageTable<0> {
+    fn try_next_table_mut(&mut self) -> Option<&mut PageTable<0>> {
+        if self.valid() {
+            Some(self.next_table_mut())
+        } else {
+            None
+        }
+    }
+
+    fn try_next_table(&self) -> Option<&PageTable<0>> {
+        if self.valid() {
+            Some(self.next_table())
+        } else {
+            None
+        }
+    }
+
+    fn next_table_mut(&mut self) -> &mut PageTable<0> {
         unsafe { &mut *(pmem_map().add(self.addr()) as *mut PageTable<0>) }
+    }
+
+    fn next_table(&self) -> &PageTable<0> {
+        unsafe { &*(pmem_map().add(self.addr()) as *const PageTable<0>) }
     }
 }
 
-#[repr(align(4096))]
+impl<const LEVEL: usize> PageTableEntry<LEVEL> {
+    fn new(cap: CapRef<Mem>, prot: abi::Prot) -> Self {
+        let bits = prot_to_bits(prot);
+        let paddr = cap.ptr().addr();
+        Self(paddr >> 12 << 10 | bits | 0b10001)
+    }
+}
+
+//#[repr(align(4096))]
 #[repr(C)]
 struct PageTable<const LEVEL: usize>([PageTableEntry<LEVEL>; 512]);
 
 impl<const LEVEL: usize> PageTable<LEVEL> {
-    fn entry(&self, idx: usize) -> PageTableEntry<LEVEL> {
-        self.0[idx]
+    fn entry(&self, idx: usize) -> &PageTableEntry<LEVEL> {
+        &self.0[idx]
     }
 
     fn entry_mut(&mut self, idx: usize) -> &mut PageTableEntry<LEVEL> {
@@ -120,13 +181,232 @@ impl PageTable<2> {
     }
 
     fn fill_kmem(&mut self) {
-        self.0[511] = Task::current().root_table().0[511];
+        self.0[511] = TaskRef::current().root_table().0[511];
+    }
+
+    fn try_next_table(&self, idx: usize) -> Option<&PageTable<1>> {
+        self.entry(idx).try_next_table()
+    }
+
+    fn try_next_table_mut(&mut self, idx: usize) -> Option<&mut PageTable<1>> {
+        self.entry_mut(idx).try_next_table_mut()
     }
 }
 
-static mut L2_TABLE: PageTable<2> = PageTable([PageTableEntry::zero(); 512]);
-static mut L1_TABLE: PageTable<1> = PageTable([PageTableEntry::zero(); 512]);
-static mut L0_TABLE: PageTable<0> = PageTable([PageTableEntry::zero(); 512]);
+impl PageTable<1> {
+    fn try_next_table(&self, idx: usize) -> Option<&PageTable<0>> {
+        self.entry(idx).try_next_table()
+    }
+
+    fn try_next_table_mut(&mut self, idx: usize) -> Option<&mut PageTable<0>> {
+        self.entry_mut(idx).try_next_table_mut()
+    }
+}
+
+impl Table {
+    fn cap_ptr(&self) -> *const Option<CapRaw> {
+        core::ptr::from_exposed_addr(0xffffffe000000000)
+    }
+
+    fn cap_mut_ptr(&mut self) -> *mut Option<CapRaw> {
+        core::ptr::from_exposed_addr_mut(0xffffffe000000000)
+    }
+
+    fn get_raw(&self, idx: usize) -> &Option<CapRaw> {
+        unsafe { &*self.cap_ptr().add(idx) }
+    }
+
+    fn get_mut_raw(&mut self, idx: usize) -> &mut Option<CapRaw> {
+        unsafe { &mut *self.cap_mut_ptr().add(idx) }
+    }
+
+    fn try_get<T: CapObj>(&self, idx: usize) -> Result<&Option<CapRef<T>>, SysError> {
+        let raw = self.get_raw(idx);
+        if raw.is_some() {
+            if raw.as_ref().unwrap().ty() == T::CAP_TYPE {
+                Ok(unsafe { core::mem::transmute(raw) })
+            } else {
+                Err(SysError::InvalidCapType)
+            }
+        } else {
+            Ok(unsafe { core::mem::transmute(raw) })
+        }
+    }
+
+    fn get<T: CapObj>(&self, idx: usize) -> Result<&CapRef<T>, SysError> {
+        self.try_get(idx)
+            .and_then(|o| o.as_ref().ok_or(SysError::SlotEmpty))
+    }
+
+    fn try_get_mut<T: CapObj>(&mut self, idx: usize) -> Result<&mut Option<CapRef<T>>, SysError> {
+        let raw = self.get_mut_raw(idx);
+        if raw.is_some() {
+            if raw.as_mut().unwrap().ty() == T::CAP_TYPE {
+                Ok(unsafe { core::mem::transmute(raw) })
+            } else {
+                Err(SysError::InvalidCapType)
+            }
+        } else {
+            Ok(unsafe { core::mem::transmute(raw) })
+        }
+    }
+
+    fn get_mut<T: CapObj>(&mut self, idx: usize) -> Result<&mut CapRef<T>, SysError> {
+        self.try_get_mut(idx)
+            .and_then(|o| o.as_mut().ok_or(SysError::SlotEmpty))
+    }
+
+    fn can_map(&self, addr: usize, depth: usize) -> Result<(), SysError> {
+        let vpn = [
+            (addr >> 12) & 0x1ff,
+            (addr >> 21) & 0x1ff,
+            (addr >> 30) & 0x1ff,
+        ];
+        let l2 = &self.0;
+        match depth {
+            34 => {
+                if l2.entry(vpn[2]).valid() {
+                    Err(SysError::SlotNotEmpty)
+                } else {
+                    Ok(())
+                }
+            }
+            43 => {
+                let l1 = l2.try_next_table(vpn[2]).ok_or(SysError::SlotEmpty)?;
+                if l1.entry(vpn[1]).valid() {
+                    Err(SysError::SlotNotEmpty)
+                } else {
+                    Ok(())
+                }
+            }
+            52 => {
+                let l1 = l2.try_next_table(vpn[2]).ok_or(SysError::SlotEmpty)?;
+                let l0 = l1.try_next_table(vpn[1]).ok_or(SysError::SlotEmpty)?;
+                if l0.entry(vpn[0]).valid() {
+                    Err(SysError::SlotNotEmpty)
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Err(SysError::WrongAlign),
+        }
+    }
+
+    fn map(
+        &mut self,
+        cap: CapRef<Mem>,
+        addr: usize,
+        depth: usize,
+        prot: abi::Prot,
+    ) -> Result<(), SysError> {
+        let vpn = [
+            (addr >> 12) & 0x1ff,
+            (addr >> 21) & 0x1ff,
+            (addr >> 30) & 0x1ff,
+        ];
+        let l2 = &mut self.0;
+        match depth {
+            34 => {
+                let mut l2e = l2.entry_mut(vpn[2]);
+                if l2e.valid() {
+                    Err(SysError::SlotNotEmpty)
+                } else {
+                    *l2e = PageTableEntry::new(cap, prot);
+                    Ok(())
+                }
+            }
+            43 => {
+                let mut l1 = l2.try_next_table_mut(vpn[2]).ok_or(SysError::SlotEmpty)?;
+                let mut l1e = l1.entry_mut(vpn[1]);
+                if l1e.valid() {
+                    Err(SysError::SlotNotEmpty)
+                } else {
+                    *l1e = PageTableEntry::new(cap, prot);
+                    Ok(())
+                }
+            }
+            52 => {
+                let mut l1 = l2.try_next_table_mut(vpn[2]).ok_or(SysError::SlotEmpty)?;
+                let mut l0 = l1.try_next_table_mut(vpn[1]).ok_or(SysError::SlotEmpty)?;
+                let mut l0e = l0.entry_mut(vpn[0]);
+                if l0e.valid() {
+                    Err(SysError::SlotNotEmpty)
+                } else {
+                    *l0e = PageTableEntry::new(cap, prot);
+                    Ok(())
+                }
+            }
+            _ => Err(SysError::WrongAlign),
+        }
+    }
+
+    fn unmap(&mut self, addr: usize, depth: usize) -> Result<CapRef<Mem>, SysError> {
+        let vpn = [
+            (addr >> 12) & 0x1ff,
+            (addr >> 21) & 0x1ff,
+            (addr >> 30) & 0x1ff,
+        ];
+        let l2 = &mut self.0;
+        match depth {
+            34 => {
+                let mut l2e = l2.entry_mut(vpn[2]);
+                if l2e.valid() {
+                    Ok(l2e.invalidate())
+                } else {
+                    Err(SysError::SlotNotEmpty)
+                }
+            }
+            43 => {
+                let mut l1 = l2.try_next_table_mut(vpn[2]).ok_or(SysError::SlotEmpty)?;
+                let mut l1e = l1.entry_mut(vpn[1]);
+                if l1e.valid() {
+                    Ok(l1e.invalidate())
+                } else {
+                    Err(SysError::SlotNotEmpty)
+                }
+            }
+            52 => {
+                let mut l1 = l2.try_next_table_mut(vpn[2]).ok_or(SysError::SlotEmpty)?;
+                let mut l0 = l1.try_next_table_mut(vpn[1]).ok_or(SysError::SlotEmpty)?;
+                let mut l0e = l0.entry_mut(vpn[0]);
+                if l0e.valid() {
+                    Ok(l0e.invalidate())
+                } else {
+                    Err(SysError::SlotNotEmpty)
+                }
+            }
+            _ => Err(SysError::WrongAlign),
+        }
+    }
+
+    fn flush(&self) {
+	    unsafe {
+		    core::arch::asm!("sfence.vma");
+	    }
+    }
+}
+
+#[repr(transparent)]
+struct CapRef<T>(CapRaw, PhantomData<T>);
+
+impl<T: CapObj> core::ops::Deref for CapRef<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self.0 .0.offset(-(T::CAP_TYPE as isize))) }
+    }
+}
+
+unsafe trait CapObj {
+    const CAP_TYPE: CapType;
+}
+
+static INIT_TASK: Aligned<Task> = Aligned(Task {
+    table: RwLock::new(Table(PageTable([PageTableEntry::zero(); 512]))),
+    id: 1,
+});
+static mut L1_TABLE: Aligned<PageTable<1>> = Aligned(PageTable([PageTableEntry::zero(); 512]));
+static mut L0_TABLE: Aligned<PageTable<0>> = Aligned(PageTable([PageTableEntry::zero(); 512]));
 
 fn pmem_map() -> *mut u8 {
     let ret;
@@ -137,7 +417,7 @@ fn pmem_map() -> *mut u8 {
 }
 
 #[repr(isize)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CapType {
     NullCap,
     Untyped,
@@ -211,9 +491,9 @@ const PAGE_MASK: usize = PAGE_SIZE - 1;
 
 #[derive(Debug)]
 #[repr(transparent)]
-struct Mem(CapRaw);
+struct MemRef(CapRaw);
 
-impl Mem {
+impl MemRef {
     fn new<T>(data: &mut [T]) -> Result<Self, ()> {
         let ptr = data.as_mut_ptr() as *mut u8;
 
@@ -255,11 +535,54 @@ impl Mem {
     fn into_raw(self) -> CapRaw {
         self.0
     }
+
+    fn invoke(self, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize) -> Self {
+        match a6 {
+            1 => {
+                let (a, b) = self.split(a1).unwrap();
+                a
+            }
+            _ => panic!(),
+        }
+    }
 }
+
+#[repr(transparent)]
+struct Table(PageTable<2>);
+
+#[repr(C)]
+struct Task {
+    table: RwLock<Table>,
+    id: usize,
+}
+
+impl Task {
+    // const fn new() -> Self {
+    // 	use core::sync::atomic::{AtomicUsize, Ordering};
+    // 	const NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
+    // 	Self {
+    // 		table: RwLock::new(Table(PageTable([PageTableEntry::zero(); 512]))),
+    // 		id: NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed),
+    // 	}
+    // }
+
+    fn table(&self) -> &RwLock<Table> {
+        &self.table
+    }
+}
+
+impl PartialEq for Task {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+impl Eq for Task {}
+
+//type Task = RwLock<PageTable<2>>;
 
 #[derive(Debug)]
 #[repr(transparent)]
-struct Task<'a>(CapRaw, core::marker::PhantomData<&'a ()>);
+struct TaskRef<'a>(CapRaw, core::marker::PhantomData<&'a ()>);
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum MapFlags {
@@ -271,6 +594,15 @@ enum MapFlags {
     ReadExecute = 6,
     Execute = 7,
     Cap = 8,
+}
+
+fn prot_to_bits(prot: abi::Prot) -> usize {
+    match prot {
+        abi::Prot::Read => 0b10,
+        abi::Prot::ReadWrite => 0b110,
+        abi::Prot::Execute => 0b1000,
+        abi::Prot::ReadExecute => 0b1010,
+    }
 }
 
 impl MapFlags {
@@ -308,7 +640,7 @@ impl MapFlags {
 
 type SysResult = Result<(), core::num::NonZeroUsize>;
 
-impl<'a> Task<'a> {
+impl<'a> TaskRef<'a> {
     fn current() -> Self {
         let activation_value;
         unsafe {
@@ -336,11 +668,11 @@ impl<'a> Task<'a> {
         ];
 
         self.root_table()
-            .entry(vpn[2])
-            .next_table()
-            .entry(vpn[1])
-            .next_table()
-            .entry(vpn[0])
+            .entry_mut(vpn[2])
+            .next_table_mut()
+            .entry_mut(vpn[1])
+            .next_table_mut()
+            .entry_mut(vpn[0])
             .addr()
     }
 
@@ -351,7 +683,7 @@ impl<'a> Task<'a> {
         }
 
         let cap = {
-            let mem = Mem::try_from(cap)?;
+            let mem = MemRef::try_from(cap)?;
             if mem.size() > 0x1000 {
                 Err(mem.into_raw())
             } else {
@@ -373,28 +705,29 @@ impl<'a> Task<'a> {
                 if l2_entry.valid() {
                     Err(cap)
                 } else {
-                    let mem = Mem::try_from(cap)?;
-                    *l2_entry =
-                        PageTableEntry(((Task::current().paddr_of(mem.0.ptr()) >> 12) << 10) | 0b1);
+                    let mem = MemRef::try_from(cap)?;
+                    *l2_entry = PageTableEntry(
+                        ((TaskRef::current().paddr_of(mem.0.ptr()) >> 12) << 10) | 0b1,
+                    );
                     Ok(())
                 }
             } else {
                 if l2_entry.valid() {
-                    let l1_entry = l2_entry.next_table().entry_mut(vpn[1]);
+                    let l1_entry = l2_entry.next_table_mut().entry_mut(vpn[1]);
 
                     if map_flags == MapFlags::Level1 {
                         if l1_entry.valid() {
                             Err(cap)
                         } else {
-                            let mem = Mem::try_from(cap)?;
+                            let mem = MemRef::try_from(cap)?;
                             *l1_entry = PageTableEntry(
-                                ((Task::current().paddr_of(mem.0.ptr()) >> 12) << 10) | 0b1,
+                                ((TaskRef::current().paddr_of(mem.0.ptr()) >> 12) << 10) | 0b1,
                             );
                             Ok(())
                         }
                     } else {
                         if l1_entry.valid() {
-                            let l0_entry = l1_entry.next_table().entry_mut(vpn[0]);
+                            let l0_entry = l1_entry.next_table_mut().entry_mut(vpn[0]);
                             let prot_bits = map_flags.get_prot();
                             if prot_bits == 0 {
                                 Err(cap)
@@ -402,9 +735,9 @@ impl<'a> Task<'a> {
                                 if l0_entry.valid() {
                                     Err(cap)
                                 } else {
-                                    let mem = Mem::try_from(cap)?;
+                                    let mem = MemRef::try_from(cap)?;
                                     *l0_entry = PageTableEntry(
-                                        ((Task::current().paddr_of(mem.0.ptr()) >> 12) << 10)
+                                        ((TaskRef::current().paddr_of(mem.0.ptr()) >> 12) << 10)
                                             | 0b10001
                                             | prot_bits,
                                     );
@@ -447,28 +780,29 @@ impl<'a> Task<'a> {
                 if l2_entry.valid() {
                     Err(cap)
                 } else {
-                    let mem = Mem::try_from(cap)?;
-                    *l2_entry =
-                        PageTableEntry(((Task::current().paddr_of(mem.0.ptr()) >> 12) << 10) | 0b1);
+                    let mem = MemRef::try_from(cap)?;
+                    *l2_entry = PageTableEntry(
+                        ((TaskRef::current().paddr_of(mem.0.ptr()) >> 12) << 10) | 0b1,
+                    );
                     Ok(())
                 }
             } else {
                 if l2_entry.valid() {
-                    let l1_entry = l2_entry.next_table().entry_mut(vpn[1]);
+                    let l1_entry = l2_entry.next_table_mut().entry_mut(vpn[1]);
 
                     if map_flags == MapFlags::Level1 {
                         if l1_entry.valid() {
                             Err(cap)
                         } else {
-                            let mem = Mem::try_from(cap)?;
+                            let mem = MemRef::try_from(cap)?;
                             *l1_entry = PageTableEntry(
-                                ((Task::current().paddr_of(mem.0.ptr()) >> 12) << 10) | 0b1,
+                                ((TaskRef::current().paddr_of(mem.0.ptr()) >> 12) << 10) | 0b1,
                             );
                             Ok(())
                         }
                     } else {
                         if l1_entry.valid() {
-                            let l0_entry = l1_entry.next_table().entry_mut(vpn[0]);
+                            let l0_entry = l1_entry.next_table_mut().entry_mut(vpn[0]);
                             let prot_bits = map_flags.get_prot();
                             if prot_bits == 0 {
                                 Err(cap)
@@ -476,9 +810,9 @@ impl<'a> Task<'a> {
                                 if l0_entry.valid() {
                                     Err(cap)
                                 } else {
-                                    let mem = Mem::try_from(cap)?;
+                                    let mem = MemRef::try_from(cap)?;
                                     *l0_entry = PageTableEntry(
-                                        ((Task::current().paddr_of(mem.0.ptr()) >> 12) << 10)
+                                        ((TaskRef::current().paddr_of(mem.0.ptr()) >> 12) << 10)
                                             | 0b1
                                             | MapFlags::ReadWrite.get_prot(),
                                     );
@@ -504,6 +838,18 @@ impl<'a> Task<'a> {
             core::arch::asm!("sfence.vma");
         }
     }
+
+    fn is_mapped(self, ptr: *const ()) -> bool {
+        todo!();
+    }
+
+    pub fn get_cap(&mut self, idx: usize) -> &mut Option<CapRaw> {
+        // SAFETY: dereferencing of an unmapped address results in a page fault which is caught
+        // and passed on to userspace.
+        unsafe {
+            &mut *core::ptr::from_exposed_addr_mut::<Option<CapRaw>>(0xffffffe000000000).add(idx)
+        }
+    }
 }
 
 #[repr(align(4096))]
@@ -519,6 +865,10 @@ struct TaskCall {
 }
 
 #[repr(align(4096))]
+#[repr(C)]
+struct Aligned<T>(T);
+
+//#[repr(align(4096))]
 #[repr(C)]
 struct Thread {
     stack: [usize; 512 * 4],
@@ -603,11 +953,11 @@ impl Thread {
     }
 
     fn switch(&mut self, interval: usize) {
-	    // scheduler threads do not have the timer enabled
-	    // we enable it as we activate the target thread.
-	    enable_timer();
-	    set_time(get_time() + interval);
-	    self.activate();
+        // scheduler threads do not have the timer enabled
+        // we enable it as we activate the target thread.
+        enable_timer();
+        set_time(get_time() + interval);
+        self.activate();
     }
 
     fn activate(&mut self) -> ! {
@@ -780,7 +1130,7 @@ unsafe extern "C" fn _start() {
         "ecall",
         "tail {rust_start}",
         options(noreturn),
-        l2_table = sym L2_TABLE,
+        l2_table = sym INIT_TASK,
         l1_table = sym L1_TABLE,
         l0_table = sym L0_TABLE,
         rust_start = sym rust_start,
@@ -789,10 +1139,10 @@ unsafe extern "C" fn _start() {
 }
 
 extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
-    // steps to do here:
     eprintln!("Conifer Kernel");
     eprintln!("\thart: {:x}", hart);
     eprintln!("\t fdt: {:x}", fdt);
+    eprintln!();
 
     eprintln!("Building Initial Task");
     eprintln!("\tfilling physical memory map");
@@ -805,8 +1155,10 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
     }
     // map all physical memory (well only 128GiB of it)
     // with other modes (sv48, sv57) we can map more.
-    unsafe {
-        L2_TABLE.fill_pmap();
+    {
+        let mut guard = INIT_TASK.0.table().write();
+        (*guard).0.fill_pmap();
+        drop(guard);
     }
 
     unsafe {
@@ -814,19 +1166,19 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
     }
     eprintln!("\tmapping initial capability space");
     let mut cap_table_mem = core::array::from_fn::<_, { 2 + 1 }, _>(|_| Page::zero());
-    let mut cap_table_mem_cap = Mem::new(&mut cap_table_mem).unwrap();
+    let mut cap_table_mem_cap = MemRef::new(&mut cap_table_mem).unwrap();
     let (cap_table_l1_cap, cap_table_mem_cap) = cap_table_mem_cap.split(PAGE_SIZE).unwrap();
     let (cap_table_l0_cap, cap_table_mem_cap) = cap_table_mem_cap.split(PAGE_SIZE).unwrap();
     let (cap_table_mem_cap, _) = cap_table_mem_cap.split(PAGE_SIZE).unwrap();
 
     // map an initial capability space of 256 capabilities.
-    Task::current()
+    TaskRef::current()
         .map_cap(cap_table_l1_cap.into_raw(), 0, MapFlags::Level2)
         .unwrap();
-    Task::current()
+    TaskRef::current()
         .map_cap(cap_table_l0_cap.into_raw(), 0, MapFlags::Level1)
         .unwrap();
-    Task::current()
+    TaskRef::current()
         .map_cap(cap_table_mem_cap.into_raw(), 0, MapFlags::Cap)
         .unwrap();
 
@@ -841,21 +1193,21 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
     let mut init_l0_stack_mem = Memory::<0x1000>::new();
     let init_l0_stack_cap = CapRaw::from_mem(&mut init_l0_stack_mem);
 
-    let mut init_code_cap = Mem::new(unsafe { &mut crate::_init }).unwrap();
+    let mut init_code_cap = MemRef::new(unsafe { &mut crate::_init }).unwrap();
     let init_start_ptr = core::ptr::from_exposed_addr_mut::<u8>(0x0);
     let init_entry_ptr = unsafe { init_start_ptr.byte_add(PAGE_SIZE) };
 
-    Task::current()
+    TaskRef::current()
         .map_mem(init_l1_cap, init_start_ptr, MapFlags::Level2)
         .unwrap();
-    Task::current()
+    TaskRef::current()
         .map_mem(init_l0_cap, init_start_ptr, MapFlags::Level1)
         .unwrap();
 
     let mut init_code_ptr = init_start_ptr;
     while init_code_cap.size() >= PAGE_SIZE {
         let (a, b) = init_code_cap.split(PAGE_SIZE).unwrap();
-        Task::current()
+        TaskRef::current()
             .map_mem(a.into_raw(), init_code_ptr, MapFlags::ReadExecute)
             .unwrap();
         init_code_cap = b;
@@ -869,21 +1221,21 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
 
     unsafe {
         let init_stack_ptr: *mut u8 = core::ptr::from_exposed_addr_mut(0x4000000000);
-        Task::current()
+        TaskRef::current()
             .map_mem(
                 init_l1_stack_cap,
                 init_stack_ptr.offset(-0x1000),
                 MapFlags::Level2,
             )
             .unwrap();
-        Task::current()
+        TaskRef::current()
             .map_mem(
                 init_l0_stack_cap,
                 init_stack_ptr.offset(-0x1000),
                 MapFlags::Level1,
             )
             .unwrap();
-        Task::current()
+        TaskRef::current()
             .map_mem(
                 init_stack_cap,
                 init_stack_ptr.offset(-0x1000),
@@ -899,13 +1251,26 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
             core::ptr::from_exposed_addr_mut(CapType::ConCap as usize),
             0,
         ));
+        let cap_1: &mut Option<CapRaw> = &mut *cap_base.add(1);
+        cap_1.replace(TaskRef::current().0);
+        let cap_2: &mut Option<CapRaw> = &mut *cap_base.add(2);
+        cap_2.replace(CapRaw(
+            // memory range starts at 0
+            core::ptr::from_exposed_addr_mut(CapType::MemCap as usize),
+            // sv39 supports up to 56 bits of physical addresses.
+            1 << 56,
+        ));
     }
     unsafe {
         core::arch::asm!("sfence.vma");
     }
 
+    eprintln!();
     eprintln!("\tcreating initial thread");
-    let mut thread = Thread::new();
+    let mut thread = {
+        let aligned = Aligned(Thread::new());
+        aligned.0
+    };
     let satp;
     unsafe {
         core::arch::asm!("csrr {}, satp", out(reg) satp);
@@ -929,10 +1294,10 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
     thread.a0 = fdt;
 
     eprintln!("\tactivating initial thread");
-    eprintln!("time {}", get_time());
-    let t = get_time();
-    set_time(t + 0x10000);
-    enable_timer();
+    eprintln!("\ttime: {}", get_time());
+    // let t = get_time();
+    // set_time(t + 0x10000);
+    // enable_timer();
     thread.activate();
 
     loop {
@@ -944,9 +1309,38 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
 struct ConRef(CapRaw);
 
 impl ConRef {
-    #[inline(never)]
-    fn invoke(&self, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize) {
+    const WRITE: usize = 2;
+
+    #[inline(always)]
+    fn write(&self, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize) {
         for a in [a1, a2, a3, a4, a5, a6] {
+            for b in a.to_ne_bytes() {
+                if b == 0 {
+                    return;
+                }
+                putchar(b);
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn invoke(&self, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) {
+        match a7 {
+            Self::WRITE => self.write(a1, a2, a3, a4, a5, a6),
+            _ => todo!("Error handling"),
+        }
+    }
+}
+
+struct Con;
+
+unsafe impl CapObj for Con {
+    const CAP_TYPE: CapType = CapType::ConCap;
+}
+
+impl Con {
+    fn write(con: &Con, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
+        for a in [a1, a2, a3, a4, a5] {
             for b in a.to_ne_bytes() {
                 if b == 0 {
                     return;
@@ -957,41 +1351,190 @@ impl ConRef {
     }
 }
 
-#[repr(transparent)]
-#[derive(PartialEq, Eq)]
-struct Syscall(usize);
-
-impl Syscall {
-    const Invoke: Self = Self(1);
+fn current_task<'a>() -> &'a Task {
+    let activation_value: usize;
+    unsafe {
+        core::arch::asm!("csrr {}, satp", out(reg) activation_value);
+    }
+    let paddr = (activation_value & ((1 << 44) - 1)) << 12;
+    let ptr = unsafe { pmem_map().add(paddr) };
+    unsafe { core::mem::transmute(ptr) }
 }
 
-unsafe extern "C" fn syscall(
+enum Mem {}
+unsafe impl CapObj for Mem {
+    const CAP_TYPE: CapType = CapType::MemCap;
+}
+
+unsafe impl CapObj for Task {
+    const CAP_TYPE: CapType = CapType::TaskCap;
+}
+
+impl<T: CapObj> CapRef<T> {
+    fn ptr(&self) -> *mut T {
+        unsafe { self.0 .0.byte_offset(-(T::CAP_TYPE as usize as isize)) as *mut T }
+    }
+
+    fn into_raw(self) -> CapRaw {
+        self.0
+    }
+}
+
+impl CapRef<Mem> {
+    fn new(ptr: *mut Mem, len: usize) -> Self {
+        Self(
+            CapRaw(
+                unsafe { ptr.byte_add(Mem::CAP_TYPE as usize) as *mut u8 },
+                len,
+            ),
+            core::marker::PhantomData,
+        )
+    }
+
+    fn len(&self) -> usize {
+        self.0 .1
+    }
+}
+
+fn syscall(
     a0: usize,
     a1: usize,
     a2: usize,
     a3: usize,
     a4: usize,
     a5: usize,
-    a6: usize,
-    a7: Syscall,
-) -> (usize, usize) {
-    let cap: &mut Option<CapRaw> =
-        unsafe { &mut *core::ptr::from_exposed_addr_mut(0xffffffe000000000 + (a0 << 8)) };
-    let cap: Option<&mut CapRaw> = cap.as_mut();
-    let cap = cap.unwrap();
-
-    match a7 {
-        Syscall::Invoke => {
-            match cap.ty() {
-                CapType::ConCap => {
-                    let cap: &mut ConRef = unsafe { core::mem::transmute(cap) };
-                    cap.invoke(a1, a2, a3, a4, a5, a6);
-                }
-                _ => {}
-            }
-            (0, 0)
+    thread: &mut Thread,
+    syscall: Syscall,
+) -> Result<(), SysError> {
+    let task = current_task();
+    let table = task.table();
+    match syscall {
+        Syscall::CapIdentify => {
+            let guard = table.read();
+            let cap = guard.get_raw(a0);
+            eprintln!("{:?}:{:#?}", cap.as_ref().map(|c| c.ty()), cap);
+            Ok(())
         }
-        _ => (0, 0),
+        Syscall::ConWrite => {
+            let guard = table.read();
+            let con = guard.get::<Con>(a0)?;
+            Con::write(&*con, a1, a2, a3, a4, a5);
+            Ok(())
+        }
+        Syscall::MemSplit => {
+            let mut guard = table.write();
+            let line = a2;
+            eprintln!("line: {:x}", line);
+            if (line & PAGE_MASK) > 0 {
+                return Err(SysError::InvalidCall);
+            }
+
+            if guard.try_get::<Mem>(a1)?.is_some() {
+                return Err(SysError::SlotNotEmpty);
+            }
+
+            let (base, len) = {
+                let mut mem_a = guard.get_mut::<Mem>(a0)?;
+                let base = mem_a.ptr();
+                let len = mem_a.len();
+                *mem_a = CapRef::<Mem>::new(base, line);
+                (base, len)
+            };
+
+            let mut mem_b = guard.try_get_mut::<Mem>(a1)?;
+            mem_b.replace(CapRef::<Mem>::new(
+                unsafe { base.byte_add(line) },
+                len - line,
+            ));
+            Ok(())
+        }
+        Syscall::TaskMapMem => {
+            let task_cap_addr = a0;
+            let mem_cap_addr = a1;
+            let map_addr = a2;
+            let map_level = a3;
+            let prot = abi::Prot::try_from(a4)?;
+            let mut guard = table.write();
+            let other_guard;
+            let mut guard = {
+                let mem = guard.get::<Mem>(mem_cap_addr)?;
+
+                if mem.len() != PAGE_SIZE {
+                    return Err(SysError::WrongSize);
+                }
+
+                let cur_task = task;
+                let task = guard.get::<Task>(task_cap_addr)?;
+                if cur_task.eq(task) {
+                    guard
+                } else {
+                    other_guard = task.table().write();
+                    other_guard
+                }
+            };
+            guard.can_map(map_addr, map_level)?;
+            let mem = {
+                let mem = guard.try_get_mut::<Mem>(mem_cap_addr)?;
+                mem.take().unwrap()
+            };
+            guard.map(mem, map_addr, map_level, prot).unwrap();
+            guard.flush();
+            Ok(())
+        }
+        Syscall::TaskUnmapMem => {
+            let task_cap_addr = a0;
+            let mem_cap_addr = a1;
+            let map_addr = a2;
+            let map_level = a3;
+            let mut guard = table.write();
+            let other_guard;
+            let mut guard = {
+                let mem = guard.try_get::<Mem>(mem_cap_addr)?;
+                if mem.is_some() {
+                    return Err(SysError::SlotNotEmpty);
+                }
+
+                let cur_task = task;
+                let task = guard.get::<Task>(task_cap_addr)?;
+                if cur_task.eq(task) {
+                    guard
+                } else {
+                    other_guard = task.table().write();
+                    other_guard
+                }
+            };
+
+            let mem = guard.unmap(map_addr, map_level)?;
+            guard.flush();
+            let mut mem_cap = guard.try_get_mut::<Mem>(mem_cap_addr)?;
+            mem_cap.replace(mem);
+
+            Ok(())
+        }
+        _ => Err(SysError::InvalidCall),
+    }
+}
+
+// entry point from an ecall
+// a0: the capability address
+// a1-a5: arguments
+// a6: current thread but offset to stack base.
+// a7: the capability function index
+unsafe extern "C" fn syscall_entry(
+    a0: usize,
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+    a5: usize,
+    a6: *mut Thread,
+    a7: usize,
+) -> usize {
+    let thread = a6.offset(-(core::mem::offset_of!(Thread, call_depth) as isize));
+    let ret = syscall(a0, a1, a2, a3, a4, a5, &mut *thread, Syscall(a7));
+    match ret {
+        Ok(_) => 0,
+        Err(e) => e as usize,
     }
 }
 
@@ -1012,16 +1555,16 @@ const TIME_FREQ_MS: usize = 10000;
 // which should be used by the scheduling task to communicate between its
 // threads.
 fn sleep_ms(ms: usize) {
-	set_time(get_time() + TIME_FREQ_MS * ms);
-	unsafe {
-		core::arch::asm!("wfi");
-	}
+    set_time(get_time() + TIME_FREQ_MS * ms);
+    unsafe {
+        core::arch::asm!("wfi");
+    }
 }
 
 extern "C" fn timer() -> ! {
-	set_time(get_time() + TIME_FREQ_MS * 1000);
-	eprintln!("{:#x?}", Task::current());
-	panic!("timer handler for hart 0 not set");
+    set_time(get_time() + TIME_FREQ_MS * 1000);
+    eprintln!("{:#x?}", TaskRef::current());
+    panic!("timer handler for hart 0 not set");
 }
 
 #[naked]
@@ -1045,6 +1588,7 @@ unsafe extern "C" fn _trap() {
     "1:",
         // Conifer call
         "neg a7, a7",
+        "mv a6, sp",
         "call {syscall}",
         "csrr ra, sepc",
         "addi ra, ra, 4",
@@ -1097,9 +1641,9 @@ unsafe extern "C" fn _trap() {
         "sd t6, 248(sp)",
 
         "tail {timer}",
-        
+
         options(noreturn),
-        syscall = sym syscall,
+        syscall = sym syscall_entry,
         timer = sym timer,
     );
 }

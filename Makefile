@@ -22,14 +22,14 @@ libcompiler_builtins.rlib: libcore.rlib compiler_builtins.rs
 liballoc.rlib: libcore.rlib libcompiler_builtins.rlib
 	$(RUSTC) $(RUST_FLAGS) --crate-type rlib --crate-name alloc $(RUST_SRC)/alloc/src/lib.rs -o $@ --cfg no_global_oom_handling
 
-init: libcore.rlib libcompiler_builtins.rlib liballoc.rlib init.rs
+init: libcore.rlib libcompiler_builtins.rlib liballoc.rlib init.rs abi.rs
 	$(RUSTC) $(RUST_FLAGS) --crate-type bin --crate-name init init.rs -C link-arg=-Tinit.$(ARCH).lds -o $@
 
 init.bin: init
 	$(OBJCOPY) -O binary init $@
 	
 
-SRCS=krnl.rs riscv64.rs con.rs
+SRCS=krnl.rs riscv64.rs con.rs rwlock.rs abi.rs
 
 krnl: libcore.rlib libcompiler_builtins.rlib init.bin $(SRCS)
 	$(RUSTC) $(RUST_FLAGS) --crate-type bin --crate-name krnl krnl.rs -C link-arg=-T$(ARCH).lds -o $@
