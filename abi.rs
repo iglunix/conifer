@@ -34,15 +34,19 @@ pub enum Prot {
 }
 
 impl TryFrom<usize> for Prot {
-	type Error = SysError;
+    type Error = SysError;
 
-	fn try_from(value: usize) -> Result<Self, Self::Error> {
-		match value {
-			1 => Ok(Prot::Read),
-			3 => Ok(Prot::ReadWrite),
-			4 => Ok(Prot::Execute),
-			5 => Ok(Prot::ReadExecute),
-			_ => Err(SysError::InvalidValue)
-		}
-	}
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Prot::Read),
+            3 => Ok(Prot::ReadWrite),
+            4 => Ok(Prot::Execute),
+            5 => Ok(Prot::ReadExecute),
+            _ => Err(SysError::InvalidValue),
+        }
+    }
 }
+
+#[repr(transparent)]
+struct CapAddr<'a>(usize, core::marker::PhantomData<&'a ()>);
+

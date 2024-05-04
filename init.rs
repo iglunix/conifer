@@ -4,9 +4,11 @@
 #![feature(vec_push_within_capacity)]
 #![feature(fn_align)]
 mod abi;
+mod fdt;
 
 extern crate alloc;
 use alloc::vec::Vec;
+use fdt::Fdt;
 
 mod panic_alloc {
     struct PanicAllocator;
@@ -153,142 +155,8 @@ impl TaskCap {
     }
 }
 
-#[derive(Debug)]
-struct FdtHeader {
-    magic: u32,
-    totalsize: u32,
-    off_dt_struct: u32,
-    off_dt_strings: u32,
-    off_mem_rsvmap: u32,
-    version: u32,
-    last_comp_version: u32,
-    size_dt_strings: u32,
-    size_dt_struct: u32,
-}
-
-impl FdtHeader {
-    unsafe fn parse_from(ptr: *const u32) -> Self {
-        Self {
-            magic: u32::from_be(core::ptr::read(ptr)),
-            totalsize: u32::from_be(core::ptr::read(ptr.add(1))),
-            off_dt_struct: u32::from_be(core::ptr::read(ptr.add(2))),
-            off_dt_strings: u32::from_be(core::ptr::read(ptr.add(3))),
-            off_mem_rsvmap: u32::from_be(core::ptr::read(ptr.add(4))),
-            version: u32::from_be(core::ptr::read(ptr.add(5))),
-            last_comp_version: u32::from_be(core::ptr::read(ptr.add(6))),
-            size_dt_strings: u32::from_be(core::ptr::read(ptr.add(7))),
-            size_dt_struct: u32::from_be(core::ptr::read(ptr.add(8))),
-        }
-    }
-}
-
 unsafe fn parse_initial_total_size(ptr: *const ()) -> u32 {
     u32::from_be(core::ptr::read((ptr as *const u32).add(1)))
-}
-
-fn parse_fdt(fdt_raw: &[u8]) {
-	let magic: &[u8; 4] = fdt_raw[0..4].try_into().unwrap();
-	let magic = u32::from_be_bytes(magic.clone());
-	eprintln!("{:x}", magic);
-	let off_dt_struct: &[u8; 4] = fdt_raw[8..12].try_into().unwrap();
-	let off_dt_struct = u32::from_be_bytes(off_dt_struct.clone()) as usize;
-	eprintln!("off_dt_struct: {}", off_dt_struct);
-	let off_dt_strings: &[u8; 4] = fdt_raw[12..16].try_into().unwrap();
-	let off_dt_strings = u32::from_be_bytes(off_dt_strings.clone()) as usize;
-	eprintln!("off_dt_strings: {}", off_dt_strings);
-	let size_dt_strings: &[u8; 4] = fdt_raw[32..36].try_into().unwrap();
-	let size_dt_strings = u32::from_be_bytes(size_dt_strings.clone()) as usize;
-	eprintln!("size_dt_strings: {}", size_dt_strings);
-	let size_dt_struct: &[u8; 4] = fdt_raw[36..40].try_into().unwrap();
-	let size_dt_struct = u32::from_be_bytes(size_dt_struct.clone()) as usize;
-	eprintln!("size_dt_struct: {}", size_dt_struct);
-
-	const FDT_BEGIN_NODE: u32 = 0x0000_0001;
-	const FDT_END_NODE: u32 = 0x0000_0002;
-	const FDT_PROP: u32 = 0x0000_0003;
-	const FDT_NOP: u32 = 0x0000_0004;
-	const FDT_END: u32 = 0x0000_0009;
-
-	let mut i = off_dt_struct;
-	let mut depth = 0;
-	while {
-		if (i % 4) != 0 {
-			panic!("not aligned");
-		}
-
-		if i >= (off_dt_struct + size_dt_struct) {
-			panic!("out of bounds");
-		}
-		let a: &[u8; 4] = fdt_raw[i..i + 4].try_into().unwrap();
-		let a = u32::from_be_bytes(a.clone());
-		i += 4;
-		match a {
-			FDT_BEGIN_NODE => {
-				for i in 0..depth {
-					print!("=")
-				}
-				print!("= begin ");
-				while fdt_raw[i] != 0 {
-					print!("{}", char::from_u32(fdt_raw[i] as u32).unwrap());
-					i+=1;
-				}
-				i+=1;
-				println!();
-				while (i%4) != 0 {
-					if (fdt_raw[i] != 0) {
-						panic!();
-					}
-					i += 1;
-				}
-				depth += 1;
-				true
-			}
-			FDT_END_NODE => {
-				depth -= 1;
-				for i in 0..depth {
-					print!("=")
-				}
-				println!("= end");
-				depth != 0
-			}
-			FDT_PROP => {
-				let len: &[u8; 4] = fdt_raw[i..i+4].try_into().unwrap();
-				let len = u32::from_be_bytes(len.clone());
-				i += 4;
-				let nameoff: &[u8; 4] = fdt_raw[i..i+4].try_into().unwrap();
-				let nameoff = u32::from_be_bytes(nameoff.clone());
-				i += 4;
-				for i in 0..depth {
-					print!("=")
-				}
-				print!("= prop {} ", len);
-				let mut j = off_dt_strings + nameoff as usize;
-				while {
-					if j >= (off_dt_strings + size_dt_strings) {
-						panic!();
-					}
-					fdt_raw[j] != 0
-				} {
-					print!("{}", char::from_u32(fdt_raw[j] as u32).unwrap());
-					j += 1;
-				}
-				println!("{:x?}", &fdt_raw[i..(i+len as usize)]);
-
-				i += len as usize;
-				while (i%4) != 0 {
-					i += 1;
-				}
-				true
-			}
-			FDT_NOP => true,
-			FDT_END => false,
-			v => {
-				println!("parse failed: {}:{:x}", i, v);
-				eprintln!("{:x?}", &fdt_raw[i-4..i+4]);
-				true
-			}
-		}
-	} {}
 }
 
 extern "C" fn rust_start(fdt: usize) {
@@ -300,7 +168,12 @@ extern "C" fn rust_start(fdt: usize) {
     eprintln!("fdt: {:x}", fdt);
     let init_mem = MemCap(CapAddr(2));
     let rest_mem = NullCap(CapAddr(3));
-    let (init_mem, rest_mem) = init_mem.split(rest_mem, fdt).unwrap();
+    // the fdt address is 8 bytes aligned (according to the device tree spec)
+    // thus the totalsize and magic will not stradle two pages since they are
+    // both 4 byte fields
+    let fdt_aligned_base = fdt & !(PAGE_SIZE - 1);
+    let fdt_aligned_offset = fdt & (PAGE_SIZE - 1);
+    let (init_mem, rest_mem) = init_mem.split(rest_mem, fdt_aligned_base).unwrap();
     let fdt_start_mem = NullCap(CapAddr(4));
     let (fdt_start_mem, rest_mem) = rest_mem.split(fdt_start_mem, PAGE_SIZE).unwrap();
 
@@ -314,10 +187,10 @@ extern "C" fn rust_start(fdt: usize) {
         let null_cap = task
             .map_mem(fdt_start_mem, 0x200000 - 4096, 52, abi::Prot::Read)
             .unwrap();
-        let ptr = (0x200000 - 4096) as *const ();
+        let ptr = ((0x200000 - 4096) as *const ()).byte_add(fdt_aligned_offset);
         let size = parse_initial_total_size(ptr) as usize;
         println!("{}", size);
-        let size_aligned = (size + 4096) & !(4095);
+        let size_aligned = (size + fdt_aligned_offset + 4096) & !(4095);
         println!("{}", size_aligned);
         let mem_cap = task.unmap_mem(null_cap, 0x200000 - 4096, 52).unwrap();
         let mut null_cap = task
@@ -337,12 +210,31 @@ extern "C" fn rust_start(fdt: usize) {
                 .unwrap();
             written += 4096
         }
-        let ptr = (0x200000 - size_aligned) as *const () as *const u8;
+        let ptr =
+            ((0x200000 - size_aligned) as *const ()).byte_add(fdt_aligned_offset) as *const u8;
         eprintln!("mapped whole fdt at addr {:p}", ptr);
         core::slice::from_raw_parts(ptr, size)
     };
 
-    parse_fdt(fdt);
+    let fdt = Fdt::new(fdt);
+    println!("{:#?}", fdt);
+    for mem in fdt.root().get_all("memory") {
+        println!("{:#?}", mem);
+    }
+    let chosen = fdt.chosen();
+    eprintln!("{:#?}", chosen);
+    let reserved = fdt.get_node("/reserved-memory").unwrap();
+    eprintln!("{:#?}", reserved);
+    for node in reserved.nodes() {
+	    println!("{:#?}", node);
+	    let reg = node.get_prop("reg").unwrap();
+	    let a: &[u8; 8] = reg[0..8].try_into().unwrap();
+	    let a = usize::from_be_bytes(a.clone());
+	    let b: &[u8; 8] = reg[8..16].try_into().unwrap();
+	    let b = usize::from_be_bytes(b.clone());
+	    println!("{:16x?}", a);
+	    println!("{:16x?}", b);
+    }
     panic!();
 
     // TODO: page frame allocator
@@ -436,3 +328,67 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     eprintln!("{}", info);
     loop {}
 }
+
+struct CapAlloc {
+	brk: usize,
+}
+
+enum AllocError {
+}
+
+impl CapAlloc {
+	fn map_more(inc: usize) {
+	}
+
+	fn map_less(dec: usize) {
+	}
+}
+
+
+/*
+struct PageVec<T> {
+	ptr: NonZero<T>,
+	capacity: usize,
+	len: usize
+}
+
+impl PageVec<T> {
+	fn try_push(&mut self, t: T) -> Result<(), ()> {
+		if self.len < self.capacity {
+			unsafe {
+				ptr.add(self.len).write(t);
+			}
+			self.len += 1;
+			Ok(())
+		} else {
+			Err(())
+		}
+	}
+
+	fn grow(&mut self, mem: MemCap) {
+
+	}
+
+	fn shrink(&mut self) -> MemCap {
+
+	}
+}
+
+struct CapHeap {
+	let free_list: PageVec<usize>
+}
+
+impl CapHeap {
+	fn alloc(&mut self) -> NullCap {
+
+	}
+}
+*/
+
+// struct PageAlloc<'a> {
+// }
+
+// given a list of regions
+// split regions up into power of two sections
+// initialise seperate buddys for each section
+// have agregate allocator object

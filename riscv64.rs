@@ -380,9 +380,9 @@ impl Table {
     }
 
     fn flush(&self) {
-	    unsafe {
-		    core::arch::asm!("sfence.vma");
-	    }
+        unsafe {
+            core::arch::asm!("sfence.vma");
+        }
     }
 }
 
@@ -1072,7 +1072,7 @@ unsafe extern "C" fn _start() {
         "srli t3, t3, 12",
         "slli t3, t3, 10",
         // set rwx and valid
-        "ori t3, t3, 0b1111",
+        "ori t3, t3, 0b11101111",
         // put table address in t5 so we can use it again later
         "mv t5, t0",
     "1:",
@@ -1117,7 +1117,6 @@ unsafe extern "C" fn _start() {
         "srli t2, t2, 12",
         "li t6, 1<<63",
         "or t2, t2, t6",
-
         "csrw satp, t2",
         "sfence.vma",
         ".align 2",
@@ -1126,6 +1125,8 @@ unsafe extern "C" fn _start() {
         "li t0, 0x40000",
         "add sp, sp, t0",
         "addi sp, sp, -8",
+        "li a0, '!'",
+        "ecall",
         "li a0, '\n'",
         "ecall",
         "tail {rust_start}",
@@ -1175,12 +1176,21 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
     TaskRef::current()
         .map_cap(cap_table_l1_cap.into_raw(), 0, MapFlags::Level2)
         .unwrap();
+    unsafe {
+        core::arch::asm!("sfence.vma");
+    }
     TaskRef::current()
         .map_cap(cap_table_l0_cap.into_raw(), 0, MapFlags::Level1)
         .unwrap();
+    unsafe {
+        core::arch::asm!("sfence.vma");
+    }
     TaskRef::current()
         .map_cap(cap_table_mem_cap.into_raw(), 0, MapFlags::Cap)
         .unwrap();
+    unsafe {
+        core::arch::asm!("sfence.vma");
+    }
 
     eprintln!("\tmapping initial task memory");
     let mut init_l1_mem = Memory::<0x1000>::new();
@@ -1216,8 +1226,11 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
         }
     }
 
-    let mut init_stack_mem = Memory::<0x1000>::new();
-    let init_stack_cap = CapRaw::from_mem::<0x1000>(&mut init_stack_mem);
+    let mut init_stack_0_mem = Memory::<0x1000>::new();
+    let init_stack_0_cap = CapRaw::from_mem::<0x1000>(&mut init_stack_0_mem);
+
+    let mut init_stack_1_mem = Memory::<0x1000>::new();
+    let init_stack_1_cap = CapRaw::from_mem::<0x1000>(&mut init_stack_1_mem);
 
     unsafe {
         let init_stack_ptr: *mut u8 = core::ptr::from_exposed_addr_mut(0x4000000000);
@@ -1237,8 +1250,15 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
             .unwrap();
         TaskRef::current()
             .map_mem(
-                init_stack_cap,
+                init_stack_0_cap,
                 init_stack_ptr.offset(-0x1000),
+                MapFlags::ReadWrite,
+            )
+            .unwrap();
+        TaskRef::current()
+            .map_mem(
+                init_stack_1_cap,
+                init_stack_ptr.offset(-0x2000),
                 MapFlags::ReadWrite,
             )
             .unwrap();
@@ -1426,7 +1446,7 @@ fn syscall(
             let line = a2;
             eprintln!("line: {:x}", line);
             if (line & PAGE_MASK) > 0 {
-                return Err(SysError::InvalidCall);
+                return Err(SysError::WrongAlign);
             }
 
             if guard.try_get::<Mem>(a1)?.is_some() {

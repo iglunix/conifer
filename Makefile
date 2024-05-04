@@ -1,4 +1,5 @@
 .POSIX:
+.PHONY: boot
 
 QEMU_EXTRA_FLAGS=
 
@@ -22,7 +23,7 @@ libcompiler_builtins.rlib: libcore.rlib compiler_builtins.rs
 liballoc.rlib: libcore.rlib libcompiler_builtins.rlib
 	$(RUSTC) $(RUST_FLAGS) --crate-type rlib --crate-name alloc $(RUST_SRC)/alloc/src/lib.rs -o $@ --cfg no_global_oom_handling
 
-init: libcore.rlib libcompiler_builtins.rlib liballoc.rlib init.rs abi.rs
+init: libcore.rlib libcompiler_builtins.rlib liballoc.rlib init.rs abi.rs fdt.rs
 	$(RUSTC) $(RUST_FLAGS) --crate-type bin --crate-name init init.rs -C link-arg=-Tinit.$(ARCH).lds -o $@
 
 init.bin: init
@@ -40,12 +41,30 @@ krnl.bin: krnl
 qemu: krnl.bin
 	qemu-system-$(ARCH) -M virt \
 	-serial mon:stdio -nographic -net none -cpu max \
-	-kernel krnl.bin $(QEMU_EXTRA_FLAGS)
+	-kernel krnl.bin $(QEMU_EXTRA_FLAGS) -append "init=/toybox console=ttyS0" \
+	-smp 2
 
 qemu.efi:
 	qemu-system-$(ARCH) -M virt \
 	-drive if=pflash,unit=0,format=raw,file=fw/$(ARCH).fd \
-	-serial mon:stdio -nographic -net none -cpu max
+	-serial mon:stdio -nographic -net noce -cpu max -s -smp 2
+
+boot: krnl.bin
+	cp krnl.bin boot
+
+qemu.uboot.s: boot
+	qemu-system-$(ARCH) -M virt \
+	-kernel fw/riscv64.u-boot-s.bin \
+	-serial mon:stdio -nographic -net none -cpu max \
+	-drive file=fat:rw:boot,if=virtio \
+	-m 256M -s
+
+qemu.uboot: boot
+	qemu-system-$(ARCH) -M virt \
+	-bios fw/riscv64.u-boot.bin \
+	-serial mon:stdio -nographic -net none -cpu max \
+	-drive file=fat:rw:boot,if=virtio \
+	-m 256M -s
 
 fmt:
 	rustfmt krnl.rs
