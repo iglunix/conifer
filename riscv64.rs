@@ -5,6 +5,8 @@ use crate::abi::SysError;
 use crate::abi::Syscall;
 use crate::rwlock::RwLock;
 
+use core::num::NonZeroUsize;
+
 use core::marker::PhantomData;
 
 pub fn wait() {
@@ -71,7 +73,7 @@ impl<const LEVEL: usize> PageTableEntry<LEVEL> {
     fn invalidate(&mut self) -> CapRef<Mem> {
         let paddr = self.addr();
         self.0 = self.0 & !1;
-        CapRef::<Mem>::new(core::ptr::from_exposed_addr_mut(paddr), PAGE_SIZE)
+        CapRef::<Mem>::new(core::ptr::without_provenance_mut(paddr), PAGE_SIZE)
     }
 }
 
@@ -205,11 +207,11 @@ impl PageTable<1> {
 
 impl Table {
     fn cap_ptr(&self) -> *const Option<CapRaw> {
-        core::ptr::from_exposed_addr(0xffffffe000000000)
+        core::ptr::without_provenance(0xffffffe000000000)
     }
 
     fn cap_mut_ptr(&mut self) -> *mut Option<CapRaw> {
-        core::ptr::from_exposed_addr_mut(0xffffffe000000000)
+        core::ptr::without_provenance_mut(0xffffffe000000000)
     }
 
     fn get_raw(&self, idx: usize) -> &Option<CapRaw> {
@@ -220,6 +222,7 @@ impl Table {
         unsafe { &mut *self.cap_mut_ptr().add(idx) }
     }
 
+/*
     fn try_get<T: CapObj>(&self, idx: usize) -> Result<&Option<CapRef<T>>, SysError> {
         let raw = self.get_raw(idx);
         if raw.is_some() {
@@ -255,6 +258,7 @@ impl Table {
         self.try_get_mut(idx)
             .and_then(|o| o.as_mut().ok_or(SysError::SlotEmpty))
     }
+*/
 
     fn can_map(&self, addr: usize, depth: usize) -> Result<(), SysError> {
         let vpn = [
@@ -393,7 +397,7 @@ impl<T: CapObj> core::ops::Deref for CapRef<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self.0 .0.offset(-(T::CAP_TYPE as isize))) }
+        unsafe { core::mem::transmute(core::ptr::with_exposed_provenance_mut::<T>(self.0 .0.get()).offset(-(T::CAP_TYPE as isize))) }
     }
 }
 
@@ -408,6 +412,36 @@ static INIT_TASK: Aligned<Task> = Aligned(Task {
 static mut L1_TABLE: Aligned<PageTable<1>> = Aligned(PageTable([PageTableEntry::zero(); 512]));
 static mut L0_TABLE: Aligned<PageTable<0>> = Aligned(PageTable([PageTableEntry::zero(); 512]));
 
+
+/// This is the main thing that is different when we have a testing harness.
+/// In the testing harness we allocate page blocks, assign a random ID aligned
+/// to page size and use that as a physical address. We translate that for
+/// testing using a hash table.
+///
+/// For real hardware the physical page address is mapped in all page tables
+/// to a specified region in memory. This is where we would add provenance
+/// information for CHERI platforms.
+#[cfg(not(test))]
+mod pat {
+    struct ResourceRef();
+
+    const PHYSICAL_MAP_BASE_ADDR: usize = 0xffffffc000000000;
+    fn lookup_resource_mut_ptr<T>(page_address: usize) -> *mut T {
+        // calculate the address of the resource
+        let resource_address = PHYSICAL_MAP_BASE_ADDR + page_address;
+
+        core::ptr::with_exposed_provenance_mut(resource_address)
+    }
+
+    unsafe fn lookup_resource_mut<T>(page_address: usize) -> &'static mut T {
+        &mut *lookup_resource_mut_ptr(page_address)
+    }
+
+    unsafe fn lookup_resource<T>(page_address: usize) -> &'static T {
+        &*lookup_resource_mut_ptr(page_address)
+    }
+}
+
 fn pmem_map() -> *mut u8 {
     let ret;
     unsafe {
@@ -419,34 +453,36 @@ fn pmem_map() -> *mut u8 {
 #[repr(isize)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CapType {
-    NullCap,
-    Untyped,
-    TaskCap,
-    MemCap,
-    ConCap,
+    Untyped = 1,
+    TaskCap = 2,
+    MemCap = 3,
+    ConCap = 4,
 }
 
+// #[derive(Debug)]
+// struct CapRaw(*mut u8, usize);
 #[derive(Debug)]
-struct CapRaw(*mut u8, usize);
+#[repr(C)]
+struct CapRaw(core::num::NonZeroUsize, usize);
 
 impl CapRaw {
     fn from_mem<const N: usize>(mem: *mut Memory<N>) -> Self {
         unsafe {
-            let ptr = mem as *mut u8;
-            Self(ptr.add(CapType::MemCap as usize), N)
+            let ptr = mem.expose_provenance();
+            Self(NonZeroUsize::new(ptr + CapType::MemCap as usize).unwrap(), N)
         }
     }
 
     fn ty(&self) -> CapType {
-        unsafe { core::mem::transmute(self.0.addr() & 0xf) }
+        unsafe { core::mem::transmute(self.0.get() & 0xf) }
     }
 
     fn ptr(&self) -> *const u8 {
-        unsafe { self.0.offset(-(self.ty() as isize)) }
+        unsafe { core::ptr::with_exposed_provenance(self.0.get() - (self.ty() as usize)) }
     }
 
     fn mut_ptr(&mut self) -> *mut u8 {
-        unsafe { self.0.offset(-(self.ty() as isize)) }
+        unsafe { core::ptr::with_exposed_provenance_mut(self.0.get() - (self.ty() as usize)) }
     }
 
     fn val(&self) -> usize {
@@ -500,24 +536,25 @@ impl MemRef {
         if (ptr.addr() & PAGE_MASK) > 0 {
             return Err(());
         }
-        let ptr = unsafe { ptr.byte_add(CapType::MemCap as usize) };
+        let ptr = ptr.expose_provenance();
+        let ptr = unsafe { ptr + CapType::MemCap as usize };
         let sz = core::mem::size_of::<T>() * data.len();
 
         // round up to page size
         let sz = (sz + PAGE_SIZE) & !PAGE_MASK;
 
-        Ok(Self(CapRaw(ptr, sz)))
+        Ok(Self(CapRaw(NonZeroUsize::new(ptr).unwrap(), sz)))
     }
 
     fn split(self, n: usize) -> Result<(Self, Self), Self> {
         if (n & PAGE_MASK) > 0 {
             return Err(self);
         }
-        let ptr = self.0 .0;
+        let ptr = self.0 .0.get();
         let len = self.0 .1;
         Ok((
-            Self(CapRaw(ptr, n)),
-            Self(CapRaw(unsafe { ptr.byte_add(n) }, len - n)),
+            Self(CapRaw(NonZeroUsize::new(ptr).unwrap(), n)),
+            Self(CapRaw(NonZeroUsize::new(ptr + n).unwrap(), len - n)),
         ))
     }
 
@@ -648,7 +685,7 @@ impl<'a> TaskRef<'a> {
         }
         let paddr = (activation_value & ((1 << 44) - 1)) << 12;
         let ptr = unsafe { pmem_map().add(paddr).add(CapType::TaskCap as usize) };
-        Self(CapRaw(ptr, activation_value), core::marker::PhantomData)
+        Self(CapRaw(NonZeroUsize::new(ptr.expose_provenance()).unwrap(), activation_value), core::marker::PhantomData)
     }
 
     fn root_table(&self) -> &mut PageTable<2> {
@@ -761,7 +798,7 @@ impl<'a> TaskRef<'a> {
     fn map_cap(&mut self, cap: CapRaw, cap_addr: usize, map_flags: MapFlags) -> Result<(), CapRaw> {
         unsafe {
             let cap_base: *mut Option<CapRaw> =
-                core::ptr::from_exposed_addr_mut(0xffffffe000000000);
+                core::ptr::without_provenance_mut(0xffffffe000000000);
             let cap_ptr = cap_base.add(cap_addr);
         }
         // capabilities can be mapped in the memory range
@@ -847,7 +884,7 @@ impl<'a> TaskRef<'a> {
         // SAFETY: dereferencing of an unmapped address results in a page fault which is caught
         // and passed on to userspace.
         unsafe {
-            &mut *core::ptr::from_exposed_addr_mut::<Option<CapRaw>>(0xffffffe000000000).add(idx)
+            &mut *core::ptr::without_provenance_mut::<Option<CapRaw>>(0xffffffe000000000).add(idx)
         }
     }
 }
@@ -858,7 +895,7 @@ struct Stack([usize; 512 * 16]);
 static STACK: Stack = Stack([0; 512 * 16]);
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct TaskCall {
     satp: core::num::NonZeroUsize,
     sepc: usize,
@@ -868,7 +905,7 @@ struct TaskCall {
 #[repr(C)]
 struct Aligned<T>(T);
 
-//#[repr(align(4096))]
+#[repr(align(4096))]
 #[repr(C)]
 struct Thread {
     stack: [usize; 512 * 4],
@@ -905,11 +942,72 @@ struct Thread {
     t5: usize,
     t6: usize,
     calls: [Option<TaskCall>; 256],
+    cap_table: LocalCapTable<512>,
+}
+
+trait CapTable {
+    fn get_raw(&self, idx: usize) -> &Option<CapRaw>;
+    fn get_mut_raw(&mut self, idx: usize) -> &mut Option<CapRaw>;
+
+    fn try_get<T: CapObj>(&self, idx: usize) -> Result<&Option<CapRef<T>>, SysError> {
+        let raw = self.get_raw(idx);
+        if raw.is_some() {
+            if raw.as_ref().unwrap().ty() == T::CAP_TYPE {
+                Ok(unsafe { core::mem::transmute(raw) })
+            } else {
+                Err(SysError::InvalidCapType)
+            }
+        } else {
+            Ok(unsafe { core::mem::transmute(raw) })
+        }
+    }
+
+    fn get<T: CapObj>(&self, idx: usize) -> Result<&CapRef<T>, SysError> {
+        self.try_get(idx)
+            .and_then(|o| o.as_ref().ok_or(SysError::SlotEmpty))
+    }
+
+    fn try_get_mut<T: CapObj>(&mut self, idx: usize) -> Result<&mut Option<CapRef<T>>, SysError> {
+        let raw = self.get_mut_raw(idx);
+        if raw.is_some() {
+            if raw.as_mut().unwrap().ty() == T::CAP_TYPE {
+                Ok(unsafe { core::mem::transmute(raw) })
+            } else {
+                Err(SysError::InvalidCapType)
+            }
+        } else {
+            Ok(unsafe { core::mem::transmute(raw) })
+        }
+    }
+
+    fn get_mut<T: CapObj>(&mut self, idx: usize) -> Result<&mut CapRef<T>, SysError> {
+        self.try_get_mut(idx)
+            .and_then(|o| o.as_mut().ok_or(SysError::SlotEmpty))
+    }
+}
+
+#[repr(transparent)]
+struct LocalCapTable<const N: usize>([Option<CapRaw>; N]);
+
+impl<const N: usize> LocalCapTable<N> {
+    fn new() -> Self {
+        Self(core::array::from_fn(|_| None))
+    }
+}
+
+impl<const N: usize> CapTable for LocalCapTable<N> {
+    fn get_raw(&self, idx: usize) -> &Option<CapRaw> {
+        &self.0[idx]
+    }
+
+    fn get_mut_raw(&mut self, idx: usize) -> &mut Option<CapRaw> {
+        &mut self.0[idx]
+    }
 }
 
 impl Thread {
-    fn new() -> Self {
-        Self {
+    fn new<const N: usize>(base_task: TaskCall, initial_caps: [CapRaw; N]) -> Self {
+        let mut ret = Self {
             call_depth: 0,
             ra: 0,
             sp: 0,
@@ -944,7 +1042,15 @@ impl Thread {
             t6: 0,
             stack: [0; 512 * 4],
             calls: [None; 256],
+            cap_table: LocalCapTable::new()
+        };
+
+        ret.push(base_task);
+        for (i, cap) in initial_caps.into_iter().enumerate() {
+            ret.cap_table.0[i] = Some(cap);
         }
+
+        ret
     }
 
     fn push(&mut self, call: TaskCall) {
@@ -1026,7 +1132,7 @@ impl Thread {
 #[link_section = ".text._start"]
 #[no_mangle]
 unsafe extern "C" fn _start() {
-    core::arch::asm!(
+    core::arch::naked_asm!(
         // Linux header
         // MZ magic
         "c.li s4, -13",
@@ -1130,7 +1236,6 @@ unsafe extern "C" fn _start() {
         "li a0, '\n'",
         "ecall",
         "tail {rust_start}",
-        options(noreturn),
         l2_table = sym INIT_TASK,
         l1_table = sym L1_TABLE,
         l0_table = sym L0_TABLE,
@@ -1204,7 +1309,7 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
     let init_l0_stack_cap = CapRaw::from_mem(&mut init_l0_stack_mem);
 
     let mut init_code_cap = MemRef::new(unsafe { &mut crate::_init }).unwrap();
-    let init_start_ptr = core::ptr::from_exposed_addr_mut::<u8>(0x0);
+    let init_start_ptr = core::ptr::without_provenance_mut::<u8>(0x0);
     let init_entry_ptr = unsafe { init_start_ptr.byte_add(PAGE_SIZE) };
 
     TaskRef::current()
@@ -1233,7 +1338,7 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
     let init_stack_1_cap = CapRaw::from_mem::<0x1000>(&mut init_stack_1_mem);
 
     unsafe {
-        let init_stack_ptr: *mut u8 = core::ptr::from_exposed_addr_mut(0x4000000000);
+        let init_stack_ptr: *mut u8 = core::ptr::without_provenance_mut(0x4000000000);
         TaskRef::current()
             .map_mem(
                 init_l1_stack_cap,
@@ -1265,10 +1370,10 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
     }
 
     unsafe {
-        let cap_base: *mut Option<CapRaw> = core::ptr::from_exposed_addr_mut(0xffffffe000000000);
+        let cap_base: *mut Option<CapRaw> = core::ptr::without_provenance_mut(0xffffffe000000000);
         let cap_0: &mut Option<CapRaw> = &mut *cap_base;
         cap_0.replace(CapRaw(
-            core::ptr::from_exposed_addr_mut(CapType::ConCap as usize),
+            NonZeroUsize::new(CapType::ConCap as usize).unwrap(),
             0,
         ));
         let cap_1: &mut Option<CapRaw> = &mut *cap_base.add(1);
@@ -1276,21 +1381,31 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
         let cap_2: &mut Option<CapRaw> = &mut *cap_base.add(2);
         cap_2.replace(CapRaw(
             // memory range starts at 0
-            core::ptr::from_exposed_addr_mut(CapType::MemCap as usize),
+            NonZeroUsize::new(CapType::MemCap as usize).unwrap(),
             // sv39 supports up to 56 bits of physical addresses.
             1 << 56,
         ));
     }
+
+    let initial_caps = [
+        None,
+        Some(TaskRef::current().0),
+        Some(CapRaw(NonZeroUsize::new(CapType::MemCap as usize).unwrap(), 1 << 56))
+    ];
+
+    let initial_caps = [
+        //CapRaw(NonZeroUsize::new(CapType::ConCap as usize).unwrap(), 0),
+        TaskRef::current().0,
+        CapRaw(NonZeroUsize::new(CapType::MemCap as usize).unwrap(), 1 << 56)
+    ];
+
     unsafe {
         core::arch::asm!("sfence.vma");
     }
 
     eprintln!();
+    eprintln!("Building Initial Thread");
     eprintln!("\tcreating initial thread");
-    let mut thread = {
-        let aligned = Aligned(Thread::new());
-        aligned.0
-    };
     let satp;
     unsafe {
         core::arch::asm!("csrr {}, satp", out(reg) satp);
@@ -1300,7 +1415,10 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
         sepc: init_entry_ptr.addr(),
     };
 
-    thread.push(call);
+    let mut thread = {
+        let aligned = Aligned(Thread::new(call, initial_caps));
+        aligned.0
+    };
 
     unsafe {
         core::arch::asm!(
@@ -1312,6 +1430,10 @@ extern "C" fn rust_start(hart: usize, fdt: usize) -> ! {
 
     thread.sp = 0x4000000000;
     thread.a0 = fdt;
+
+    eprintln!("size of thread: 0x{:x}", core::mem::size_of::<Thread>());
+    eprintln!("size of thread: {}", core::mem::size_of::<CapRaw>());
+    eprintln!("size of thread: {}", core::mem::size_of::<Option<CapRaw>>());
 
     eprintln!("\tactivating initial thread");
     eprintln!("\ttime: {}", get_time());
@@ -1359,8 +1481,8 @@ unsafe impl CapObj for Con {
 }
 
 impl Con {
-    fn write(con: &Con, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
-        for a in [a1, a2, a3, a4, a5] {
+    fn write(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
+        for a in [a0, a1, a2, a3, a4, a5] {
             for b in a.to_ne_bytes() {
                 if b == 0 {
                     return;
@@ -1392,7 +1514,7 @@ unsafe impl CapObj for Task {
 
 impl<T: CapObj> CapRef<T> {
     fn ptr(&self) -> *mut T {
-        unsafe { self.0 .0.byte_offset(-(T::CAP_TYPE as usize as isize)) as *mut T }
+        unsafe { core::ptr::with_exposed_provenance_mut(self.0 .0.get() -(T::CAP_TYPE as usize)) }
     }
 
     fn into_raw(self) -> CapRaw {
@@ -1402,9 +1524,10 @@ impl<T: CapObj> CapRef<T> {
 
 impl CapRef<Mem> {
     fn new(ptr: *mut Mem, len: usize) -> Self {
+        let ptr = ptr.expose_provenance();
         Self(
             CapRaw(
-                unsafe { ptr.byte_add(Mem::CAP_TYPE as usize) as *mut u8 },
+                NonZeroUsize::new(ptr + Mem::CAP_TYPE as usize).unwrap(),
                 len,
             ),
             core::marker::PhantomData,
@@ -1430,42 +1553,44 @@ fn syscall(
     let table = task.table();
     match syscall {
         Syscall::CapIdentify => {
-            let guard = table.read();
-            let cap = guard.get_raw(a0);
-            eprintln!("{:?}:{:#?}", cap.as_ref().map(|c| c.ty()), cap);
+            // let guard = table.read();
+            // let cap = guard.get_raw(a0);
+            // eprintln!("global: {:?}:{:#?}", cap.as_ref().map(|c| c.ty()), cap);
+            // drop(guard);
+
+            let cap = thread.cap_table.get_raw(a0);
+            eprintln!("local: {:x?}:{:#x?}", cap.as_ref().map(|c| c.ty()), cap);
             Ok(())
         }
         Syscall::ConWrite => {
-            let guard = table.read();
-            let con = guard.get::<Con>(a0)?;
-            Con::write(&*con, a1, a2, a3, a4, a5);
+            Con::write(a0, a1, a2, a3, a4, a5);
             Ok(())
         }
         Syscall::MemSplit => {
-            let mut guard = table.write();
             let line = a2;
             eprintln!("line: {:x}", line);
             if (line & PAGE_MASK) > 0 {
                 return Err(SysError::WrongAlign);
             }
 
-            if guard.try_get::<Mem>(a1)?.is_some() {
+            if thread.cap_table.try_get::<Mem>(a1)?.is_some() {
                 return Err(SysError::SlotNotEmpty);
             }
 
             let (base, len) = {
-                let mut mem_a = guard.get_mut::<Mem>(a0)?;
+                let mut mem_a = thread.cap_table.get_mut::<Mem>(a0)?;
                 let base = mem_a.ptr();
                 let len = mem_a.len();
                 *mem_a = CapRef::<Mem>::new(base, line);
                 (base, len)
             };
 
-            let mut mem_b = guard.try_get_mut::<Mem>(a1)?;
+            let mut mem_b = thread.cap_table.try_get_mut::<Mem>(a1)?;
             mem_b.replace(CapRef::<Mem>::new(
                 unsafe { base.byte_add(line) },
                 len - line,
             ));
+
             Ok(())
         }
         Syscall::TaskMapMem => {
@@ -1474,17 +1599,27 @@ fn syscall(
             let map_addr = a2;
             let map_level = a3;
             let prot = abi::Prot::try_from(a4)?;
-            let mut guard = table.write();
-            let other_guard;
-            let mut guard = {
-                let mem = guard.get::<Mem>(mem_cap_addr)?;
+
+            {
+                thread.cap_table.get::<Task>(task_cap_addr)?;
+            }
+            
+            let mem = {
+                let mem = thread.cap_table.get::<Mem>(mem_cap_addr)?;
 
                 if mem.len() != PAGE_SIZE {
                     return Err(SysError::WrongSize);
                 }
 
+                let mem = thread.cap_table.try_get_mut::<Mem>(mem_cap_addr)?;
+                mem.take().unwrap()
+            };
+
+            let mut guard = table.write();
+            let other_guard;
+            let mut guard = {
                 let cur_task = task;
-                let task = guard.get::<Task>(task_cap_addr)?;
+                let task = thread.cap_table.get::<Task>(task_cap_addr)?;
                 if cur_task.eq(task) {
                     guard
                 } else {
@@ -1492,14 +1627,19 @@ fn syscall(
                     other_guard
                 }
             };
-            guard.can_map(map_addr, map_level)?;
-            let mem = {
-                let mem = guard.try_get_mut::<Mem>(mem_cap_addr)?;
-                mem.take().unwrap()
-            };
-            guard.map(mem, map_addr, map_level, prot).unwrap();
-            guard.flush();
-            Ok(())
+            match guard.can_map(map_addr, map_level) {
+                Ok(()) => {
+                    guard.map(mem, map_addr, map_level, prot).unwrap();
+                    guard.flush();
+                    Ok(())
+                }
+                Err(e) => {
+                    drop(guard);
+                    let mut mem_cap = thread.cap_table.try_get_mut::<Mem>(mem_cap_addr)?;
+                    mem_cap.replace(mem);
+                    Err(e)
+                }
+            }
         }
         Syscall::TaskUnmapMem => {
             let task_cap_addr = a0;
@@ -1509,13 +1649,13 @@ fn syscall(
             let mut guard = table.write();
             let other_guard;
             let mut guard = {
-                let mem = guard.try_get::<Mem>(mem_cap_addr)?;
+                let mem = thread.cap_table.try_get::<Mem>(mem_cap_addr)?;
                 if mem.is_some() {
                     return Err(SysError::SlotNotEmpty);
                 }
 
                 let cur_task = task;
-                let task = guard.get::<Task>(task_cap_addr)?;
+                let task = thread.cap_table.get::<Task>(task_cap_addr)?;
                 if cur_task.eq(task) {
                     guard
                 } else {
@@ -1526,7 +1666,8 @@ fn syscall(
 
             let mem = guard.unmap(map_addr, map_level)?;
             guard.flush();
-            let mut mem_cap = guard.try_get_mut::<Mem>(mem_cap_addr)?;
+            drop(guard);
+            let mut mem_cap = thread.cap_table.try_get_mut::<Mem>(mem_cap_addr)?;
             mem_cap.replace(mem);
 
             Ok(())
@@ -1550,7 +1691,7 @@ unsafe extern "C" fn syscall_entry(
     a6: *mut Thread,
     a7: usize,
 ) -> usize {
-    let thread = a6.offset(-(core::mem::offset_of!(Thread, call_depth) as isize));
+    let thread = a6.byte_offset(-(core::mem::offset_of!(Thread, call_depth) as isize));
     let ret = syscall(a0, a1, a2, a3, a4, a5, &mut *thread, Syscall(a7));
     match ret {
         Ok(_) => 0,
@@ -1562,7 +1703,7 @@ unsafe extern "C" fn syscall_entry(
 #[naked]
 #[repr(align(4))]
 unsafe extern "C" fn init_trap() {
-    core::arch::asm!("wfi", options(noreturn))
+    core::arch::naked_asm!("wfi")
 }
 
 const TIME_FREQ_MS: usize = 10000;
@@ -1590,7 +1731,7 @@ extern "C" fn timer() -> ! {
 #[naked]
 #[repr(align(4))]
 unsafe extern "C" fn _trap() {
-    core::arch::asm!(
+    core::arch::naked_asm!(
         "csrrw sp, sscratch, sp",
         "sd ra, 8(sp)",
         "csrr ra, scause",
@@ -1662,7 +1803,6 @@ unsafe extern "C" fn _trap() {
 
         "tail {timer}",
 
-        options(noreturn),
         syscall = sym syscall_entry,
         timer = sym timer,
     );

@@ -4,11 +4,11 @@
 #![feature(vec_push_within_capacity)]
 #![feature(fn_align)]
 mod abi;
-mod fdt;
+// mod fdt;
 
 extern crate alloc;
 use alloc::vec::Vec;
-use fdt::Fdt;
+// use fdt::Fdt;
 
 mod panic_alloc {
     struct PanicAllocator;
@@ -32,7 +32,7 @@ mod panic_alloc {
 #[link_section = ".text._start"]
 #[repr(align(4096))]
 unsafe extern "C" fn _start() {
-    core::arch::asm!(
+    core::arch::naked_asm!(
         "nop",
         ".align 11",
         "1:",
@@ -42,7 +42,6 @@ unsafe extern "C" fn _start() {
         "addi sp, sp, -16",
         "tail {}",
         sym rust_start,
-        options(noreturn)
     );
 }
 fn syscall(
@@ -161,20 +160,24 @@ unsafe fn parse_initial_total_size(ptr: *const ()) -> u32 {
 
 extern "C" fn rust_start(fdt: usize) {
     eprintln!("Hello, World!");
-    println!("Hay, Bitches!");
+    println!("Beep Boop, I'm a computer!");
     use core::fmt::Write;
-    Con(0).write_str("Sup!\n").unwrap();
-    let task = TaskCap(CapAddr(1));
+    Con.write_str("Sup!\n").unwrap();
+    let task = TaskCap(CapAddr(0));
     eprintln!("fdt: {:x}", fdt);
-    let init_mem = MemCap(CapAddr(2));
-    let rest_mem = NullCap(CapAddr(3));
+    let init_mem = MemCap(CapAddr(1));
+    let rest_mem = NullCap(CapAddr(2));
     // the fdt address is 8 bytes aligned (according to the device tree spec)
     // thus the totalsize and magic will not stradle two pages since they are
     // both 4 byte fields
     let fdt_aligned_base = fdt & !(PAGE_SIZE - 1);
     let fdt_aligned_offset = fdt & (PAGE_SIZE - 1);
+    eprintln!("rest_mem:");
+    cap_id(3);
+    eprintln!("init_mem:");
+    cap_id(2);
     let (init_mem, rest_mem) = init_mem.split(rest_mem, fdt_aligned_base).unwrap();
-    let fdt_start_mem = NullCap(CapAddr(4));
+    let fdt_start_mem = NullCap(CapAddr(3));
     let (fdt_start_mem, rest_mem) = rest_mem.split(fdt_start_mem, PAGE_SIZE).unwrap();
 
     cap_id(0);
@@ -216,6 +219,7 @@ extern "C" fn rust_start(fdt: usize) {
         core::slice::from_raw_parts(ptr, size)
     };
 
+    /*
     let fdt = Fdt::new(fdt);
     println!("{:#?}", fdt);
     for mem in fdt.root().get_all("memory") {
@@ -235,6 +239,7 @@ extern "C" fn rust_start(fdt: usize) {
 	    println!("{:16x?}", a);
 	    println!("{:16x?}", b);
     }
+    */
     panic!();
 
     // TODO: page frame allocator
@@ -250,26 +255,26 @@ extern "C" fn rust_start(fdt: usize) {
     loop {}
 }
 
-pub struct Con(usize);
+pub struct Con;
 
 impl core::fmt::Write for Con {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        fn write_vals(cap: usize, vals: [usize; 5]) -> core::fmt::Result {
+        fn write_vals(vals: [usize; 6]) -> core::fmt::Result {
             unsafe {
                 syscall(
-                    cap,
                     vals[0],
                     vals[1],
                     vals[2],
                     vals[3],
                     vals[4],
+                    vals[5],
                     abi::Syscall::ConWrite,
                 )
                 .or(Err(core::fmt::Error))
             }
         }
         let mut idx = 0;
-        let mut vals = [0; 5];
+        let mut vals = [0; 6];
         let mut shift = 0;
         for b in s.bytes() {
             vals[idx] |= (b as usize) << shift;
@@ -283,13 +288,13 @@ impl core::fmt::Write for Con {
 
             if idx == 4 {
                 idx = 0;
-                write_vals(self.0, vals)?;
-                vals = [0; 5];
+                write_vals(vals)?;
+                vals = [0; 6];
             }
         }
 
         if idx != 0 || shift != 0 {
-            write_vals(self.0, vals)?;
+            write_vals(vals)?;
         }
         Ok(())
     }
@@ -297,7 +302,7 @@ impl core::fmt::Write for Con {
 
 pub fn _print(args: core::fmt::Arguments) {
     use core::fmt::Write;
-    Con(0).write_fmt(args).unwrap();
+    Con.write_fmt(args).unwrap();
 }
 
 #[macro_export]
