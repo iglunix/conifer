@@ -4,11 +4,11 @@
 #![feature(vec_push_within_capacity)]
 #![feature(fn_align)]
 mod abi;
-// mod fdt;
+mod fdt;
 
 extern crate alloc;
 use alloc::vec::Vec;
-// use fdt::Fdt;
+use fdt::Fdt;
 
 mod panic_alloc {
     struct PanicAllocator;
@@ -186,10 +186,12 @@ extern "C" fn rust_start(fdt: usize) {
     cap_id(3);
     cap_id(4);
     let mut rest_mem = rest_mem;
+
     let fdt = unsafe {
         let null_cap = task
             .map_mem(fdt_start_mem, 0x200000 - 4096, 52, abi::Prot::Read)
             .unwrap();
+        println!("eee");
         let ptr = ((0x200000 - 4096) as *const ()).byte_add(fdt_aligned_offset);
         let size = parse_initial_total_size(ptr) as usize;
         println!("{}", size);
@@ -219,9 +221,9 @@ extern "C" fn rust_start(fdt: usize) {
         core::slice::from_raw_parts(ptr, size)
     };
 
-    /*
     let fdt = Fdt::new(fdt);
-    println!("{:#?}", fdt);
+    eprintln!("{:#?}", fdt);
+    /*
     for mem in fdt.root().get_all("memory") {
         println!("{:#?}", mem);
     }
@@ -230,14 +232,14 @@ extern "C" fn rust_start(fdt: usize) {
     let reserved = fdt.get_node("/reserved-memory").unwrap();
     eprintln!("{:#?}", reserved);
     for node in reserved.nodes() {
-	    println!("{:#?}", node);
-	    let reg = node.get_prop("reg").unwrap();
-	    let a: &[u8; 8] = reg[0..8].try_into().unwrap();
-	    let a = usize::from_be_bytes(a.clone());
-	    let b: &[u8; 8] = reg[8..16].try_into().unwrap();
-	    let b = usize::from_be_bytes(b.clone());
-	    println!("{:16x?}", a);
-	    println!("{:16x?}", b);
+        println!("{:#?}", node);
+        let reg = node.get_prop("reg").unwrap();
+        let a: &[u8; 8] = reg[0..8].try_into().unwrap();
+        let a = usize::from_be_bytes(a.clone());
+        let b: &[u8; 8] = reg[8..16].try_into().unwrap();
+        let b = usize::from_be_bytes(b.clone());
+        println!("{:16x?}", a);
+        println!("{:16x?}", b);
     }
     */
     panic!();
@@ -335,58 +337,54 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 }
 
 struct CapAlloc {
-	brk: usize,
+    brk: usize,
 }
 
-enum AllocError {
-}
+enum AllocError {}
 
 impl CapAlloc {
-	fn map_more(inc: usize) {
-	}
+    fn map_more(inc: usize) {}
 
-	fn map_less(dec: usize) {
-	}
+    fn map_less(dec: usize) {}
 }
-
 
 /*
 struct PageVec<T> {
-	ptr: NonZero<T>,
-	capacity: usize,
-	len: usize
+    ptr: NonZero<T>,
+    capacity: usize,
+    len: usize
 }
 
 impl PageVec<T> {
-	fn try_push(&mut self, t: T) -> Result<(), ()> {
-		if self.len < self.capacity {
-			unsafe {
-				ptr.add(self.len).write(t);
-			}
-			self.len += 1;
-			Ok(())
-		} else {
-			Err(())
-		}
-	}
+    fn try_push(&mut self, t: T) -> Result<(), ()> {
+        if self.len < self.capacity {
+            unsafe {
+                ptr.add(self.len).write(t);
+            }
+            self.len += 1;
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
 
-	fn grow(&mut self, mem: MemCap) {
+    fn grow(&mut self, mem: MemCap) {
 
-	}
+    }
 
-	fn shrink(&mut self) -> MemCap {
+    fn shrink(&mut self) -> MemCap {
 
-	}
+    }
 }
 
 struct CapHeap {
-	let free_list: PageVec<usize>
+    let free_list: PageVec<usize>
 }
 
 impl CapHeap {
-	fn alloc(&mut self) -> NullCap {
+    fn alloc(&mut self) -> NullCap {
 
-	}
+    }
 }
 */
 

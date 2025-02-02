@@ -49,4 +49,3 @@ impl TryFrom<usize> for Prot {
 
 #[repr(transparent)]
 struct CapAddr<'a>(usize, core::marker::PhantomData<&'a ()>);
-
